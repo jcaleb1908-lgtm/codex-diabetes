@@ -1,0 +1,1046 @@
+# ============================================================
+# GDM → CVD Retrospective Cohort Study
+# All of Us Researcher Workbench — Controlled Tier v8
+# ============================================================
+# Study: Long-term cardiovascular risk after gestational
+#        diabetes mellitus (GDM) in women aged 25–65
+# ============================================================
+
+# %% [markdown]
+# # GDM and Long-Term Cardiovascular Disease Risk
+# **Retrospective Cohort Study — All of Us Research Program**
+#
+# **Objective:** Evaluate whether women with a history of GDM have
+# increased long-term risk of CVD compared to women without prior GDM.
+
+# %% ── Cell 1: Imports & Setup ──────────────────────────────
+import pandas as pd
+import numpy as np
+import os
+from datetime import datetime
+
+# Stats & modeling
+from scipy import stats
+from scipy.stats import chi2_contingency, mannwhitneyu
+import statsmodels.api as sm
+from statsmodels.stats.proportion import proportions_ztest
+
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Suppress warnings
+import warnings
+warnings.filterwarnings('ignore')
+
+# All of Us environment
+CDR = os.environ["WORKSPACE_CDR"]
+
+print("✅ Libraries loaded")
+print(f"CDR: {CDR}")
+
+# %% ── Cell 2: Define OMOP Concept IDs ─────────────────────
+# ============================================================
+# OMOP STANDARD CONCEPT IDS
+# Verify these in the All of Us concept set browser before running.
+# You can verify any concept at:
+#   https://athena.ohdsi.org/search-terms/terms/<concept_id>
+# ============================================================
+
+# --- Demographics ---
+FEMALE_SEX_AT_BIRTH = 45878463
+
+# --- Exposure: Gestational Diabetes Mellitus ---
+GDM_CONCEPT_IDS = (
+    4024659,   # Gestational diabetes mellitus (SNOMED 11687002)
+    40480000,  # GDM — delivered (SNOMED)
+    4058243,   # GDM in pregnancy (SNOMED)
+    37018196,  # GDM, diet controlled
+    37018197,  # GDM, insulin controlled
+)
+
+# --- Pregnancy ---
+PREGNANCY_CONCEPT_IDS = (
+    4299535,   # Pregnant (SNOMED 77386006)
+    4128331,   # Pregnancy finding
+    40483082,  # Normal pregnancy
+    4092289,   # Delivery finding
+    4148243,   # Labor / delivery procedure
+)
+
+# --- Outcome: Cardiovascular Disease ---
+HTN_CONCEPT_IDS = (
+    316866,    # Hypertensive disorder (SNOMED 38341003)
+    320128,    # Essential hypertension
+    314378,    # Hypertensive heart disease
+)
+
+CAD_CONCEPT_IDS = (
+    317576,    # Coronary arteriosclerosis (SNOMED 53741008)
+    321318,    # Acute myocardial infarction
+    4329847,   # Myocardial infarction
+    314665,    # Old MI
+)
+
+STROKE_CONCEPT_IDS = (
+    381591,    # Cerebrovascular disease (SNOMED 62914000)
+    372924,    # Cerebral infarction
+    443454,    # Cerebral hemorrhage
+    4043731,   # Ischemic stroke
+)
+
+HF_CONCEPT_IDS = (
+    316139,    # Heart failure (SNOMED 84114007)
+    319835,    # Congestive heart failure
+    443580,    # Left heart failure
+    443587,    # Right heart failure
+)
+
+ALL_CVD_CONCEPT_IDS = HTN_CONCEPT_IDS + CAD_CONCEPT_IDS + STROKE_CONCEPT_IDS + HF_CONCEPT_IDS
+
+# --- Exclusion: Pre-existing Diabetes ---
+T1DM_CONCEPT_IDS = (
+    201254,    # Type 1 diabetes mellitus (SNOMED 46635009)
+    40484648,  # Type 1 DM without complication
+)
+
+T2DM_CONCEPT_IDS = (
+    201826,    # Type 2 diabetes mellitus (SNOMED 44054006)
+    201820,    # Diabetes mellitus (generic)
+    443238,    # T2DM without complication
+)
+
+ALL_DM_EXCLUSION = T1DM_CONCEPT_IDS + T2DM_CONCEPT_IDS
+
+# --- Covariates ---
+BMI_CONCEPT_ID = 3038553         # BMI measurement (LOINC 39156-5)
+SMOKING_CONCEPT_IDS = (
+    4298794,   # Current smoker
+    4144272,   # Former smoker
+    4220362,   # Never smoked
+    903654,    # Smoking status survey
+)
+
+# Survey concept for self-reported GDM
+GDM_SURVEY_CONCEPT_ID = 43530714
+
+print("✅ Concept IDs defined")
+
+# %% ── Cell 3: Build Base Cohort (Women 25–65 with pregnancy) ──
+
+base_cohort_sql = f"""
+-- ==========================================================
+-- BASE COHORT: Women 25–65, alive, with prior pregnancy
+-- ==========================================================
+WITH female_persons AS (
+    SELECT
+        p.person_id,
+        p.birth_datetime,
+        DATE_DIFF(CURRENT_DATE, DATE(p.birth_datetime), YEAR) AS age,
+        p.race_concept_id,
+        race_c.concept_name AS race,
+        p.ethnicity_concept_id,
+        eth_c.concept_name AS ethnicity,
+        p.sex_at_birth_concept_id
+    FROM `{CDR}.person` p
+    LEFT JOIN `{CDR}.concept` race_c ON p.race_concept_id = race_c.concept_id
+    LEFT JOIN `{CDR}.concept` eth_c  ON p.ethnicity_concept_id = eth_c.concept_id
+    WHERE p.sex_at_birth_concept_id = {FEMALE_SEX_AT_BIRTH}
+      AND DATE_DIFF(CURRENT_DATE, DATE(p.birth_datetime), YEAR) BETWEEN 25 AND 65
+      AND NOT EXISTS (
+          SELECT 1 FROM `{CDR}.death` d WHERE d.person_id = p.person_id
+      )
+),
+pregnancy_ehr AS (
+    SELECT DISTINCT co.person_id
+    FROM `{CDR}.condition_occurrence` co
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {PREGNANCY_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+),
+pregnancy_survey AS (
+    SELECT DISTINCT person_id
+    FROM `{CDR}.ds_survey`
+    WHERE question_concept_id IN (
+        SELECT concept_id FROM `{CDR}.concept`
+        WHERE LOWER(concept_name) LIKE '%pregnan%'
+          AND domain_id = 'Observation'
+    )
+    AND LOWER(answer) IN ('yes', 'true', '1')
+),
+has_pregnancy AS (
+    SELECT person_id FROM pregnancy_ehr
+    UNION DISTINCT
+    SELECT person_id FROM pregnancy_survey
+)
+SELECT fp.*
+FROM female_persons fp
+INNER JOIN has_pregnancy hp ON fp.person_id = hp.person_id
+"""
+
+print("⏳ Querying base cohort...")
+base_cohort_df = pd.read_gbq(base_cohort_sql, dialect="standard",
+                              use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                              progress_bar_type="tqdm_notebook")
+print(f"✅ Base cohort: {len(base_cohort_df):,} women with prior pregnancy")
+base_cohort_df.head()
+
+# %% ── Cell 4: Identify GDM Exposure ───────────────────────
+
+gdm_exposure_sql = f"""
+-- ==========================================================
+-- GDM EXPOSURE: EHR diagnosis OR self-report
+-- ==========================================================
+WITH gdm_ehr AS (
+    SELECT DISTINCT
+        co.person_id,
+        MIN(co.condition_start_datetime) AS gdm_first_date
+    FROM `{CDR}.condition_occurrence` co
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {GDM_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY co.person_id
+),
+gdm_survey AS (
+    SELECT DISTINCT person_id, CAST(NULL AS TIMESTAMP) AS gdm_first_date
+    FROM `{CDR}.ds_survey`
+    WHERE question_concept_id = {GDM_SURVEY_CONCEPT_ID}
+      AND LOWER(answer) IN ('yes', 'true', '1')
+),
+gdm_combined AS (
+    SELECT person_id, gdm_first_date FROM gdm_ehr
+    UNION DISTINCT
+    SELECT person_id, gdm_first_date FROM gdm_survey
+)
+SELECT
+    person_id,
+    MIN(gdm_first_date) AS gdm_index_date
+FROM gdm_combined
+GROUP BY person_id
+"""
+
+print("⏳ Querying GDM exposure...")
+gdm_df = pd.read_gbq(gdm_exposure_sql, dialect="standard",
+                       use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                       progress_bar_type="tqdm_notebook")
+print(f"✅ GDM exposure identified: {len(gdm_df):,} women")
+
+# %% ── Cell 5: Apply Exclusion Criteria ─────────────────────
+
+# --- 5A: Exclude pre-existing CVD before/during pregnancy ---
+preexisting_cvd_sql = f"""
+WITH first_pregnancy AS (
+    SELECT
+        person_id,
+        MIN(condition_start_datetime) AS first_preg_date
+    FROM `{CDR}.condition_occurrence`
+    WHERE condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {PREGNANCY_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY person_id
+)
+SELECT DISTINCT co.person_id
+FROM `{CDR}.condition_occurrence` co
+INNER JOIN first_pregnancy fp ON co.person_id = fp.person_id
+WHERE co.condition_concept_id IN (
+    SELECT DISTINCT c.concept_id
+    FROM `{CDR}.cb_criteria` c
+    JOIN (
+        SELECT CAST(cr.id AS STRING) AS id
+        FROM `{CDR}.cb_criteria` cr
+        WHERE concept_id IN {ALL_CVD_CONCEPT_IDS}
+          AND full_text LIKE '%_rank1]%'
+    ) a ON (
+        c.path LIKE CONCAT('%.', a.id, '.%')
+        OR c.path LIKE CONCAT('%.', a.id)
+        OR c.path LIKE CONCAT(a.id, '.%')
+        OR c.path = a.id
+    )
+    WHERE is_standard = 1 AND is_selectable = 1
+)
+AND co.condition_start_datetime <= fp.first_preg_date
+"""
+
+print("⏳ Identifying pre-existing CVD...")
+preexisting_cvd_df = pd.read_gbq(preexisting_cvd_sql, dialect="standard",
+                                   use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                                   progress_bar_type="tqdm_notebook")
+exclude_cvd = set(preexisting_cvd_df['person_id'])
+print(f"  ❌ Pre-existing CVD: {len(exclude_cvd):,}")
+
+# --- 5B: Exclude pre-existing T1DM or T2DM before pregnancy ---
+preexisting_dm_sql = f"""
+WITH first_pregnancy AS (
+    SELECT
+        person_id,
+        MIN(condition_start_datetime) AS first_preg_date
+    FROM `{CDR}.condition_occurrence`
+    WHERE condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {PREGNANCY_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY person_id
+)
+SELECT DISTINCT co.person_id
+FROM `{CDR}.condition_occurrence` co
+INNER JOIN first_pregnancy fp ON co.person_id = fp.person_id
+WHERE co.condition_concept_id IN (
+    SELECT DISTINCT c.concept_id
+    FROM `{CDR}.cb_criteria` c
+    JOIN (
+        SELECT CAST(cr.id AS STRING) AS id
+        FROM `{CDR}.cb_criteria` cr
+        WHERE concept_id IN {ALL_DM_EXCLUSION}
+          AND full_text LIKE '%_rank1]%'
+    ) a ON (
+        c.path LIKE CONCAT('%.', a.id, '.%')
+        OR c.path LIKE CONCAT('%.', a.id)
+        OR c.path LIKE CONCAT(a.id, '.%')
+        OR c.path = a.id
+    )
+    WHERE is_standard = 1 AND is_selectable = 1
+)
+AND co.condition_start_datetime < fp.first_preg_date
+"""
+
+print("⏳ Identifying pre-existing diabetes...")
+preexisting_dm_df = pd.read_gbq(preexisting_dm_sql, dialect="standard",
+                                  use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                                  progress_bar_type="tqdm_notebook")
+exclude_dm = set(preexisting_dm_df['person_id'])
+print(f"  ❌ Pre-existing T1DM/T2DM: {len(exclude_dm):,}")
+
+# --- 5C: Apply exclusions to base cohort ---
+all_exclusions = exclude_cvd | exclude_dm
+
+cohort_df = base_cohort_df[~base_cohort_df['person_id'].isin(all_exclusions)].copy()
+print(f"\n📊 Cohort after CVD & DM exclusions: {len(cohort_df):,}")
+
+# --- 5D: Assign GDM exposure ---
+cohort_df['gdm_exposure'] = cohort_df['person_id'].isin(gdm_df['person_id']).astype(int)
+
+print(f"   GDM group (exposed):     {cohort_df['gdm_exposure'].sum():,}")
+print(f"   No-GDM group (unexposed): {(cohort_df['gdm_exposure'] == 0).sum():,}")
+
+# %% ── Cell 6: Extract Covariates ──────────────────────────
+
+# --- 6A: BMI (most recent measurement) ---
+bmi_sql = f"""
+SELECT
+    m.person_id,
+    m.value_as_number AS bmi,
+    m.measurement_datetime,
+    ROW_NUMBER() OVER (PARTITION BY m.person_id ORDER BY m.measurement_datetime DESC) AS rn
+FROM `{CDR}.measurement` m
+WHERE m.measurement_concept_id = {BMI_CONCEPT_ID}
+  AND m.value_as_number BETWEEN 10 AND 80
+"""
+
+bmi_full_sql = f"""
+SELECT person_id, bmi
+FROM ({bmi_sql})
+WHERE rn = 1
+"""
+
+print("⏳ Extracting BMI...")
+bmi_df = pd.read_gbq(bmi_full_sql, dialect="standard",
+                       use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                       progress_bar_type="tqdm_notebook")
+cohort_df = cohort_df.merge(bmi_df, on='person_id', how='left')
+print(f"   BMI available for: {cohort_df['bmi'].notna().sum():,} / {len(cohort_df):,}")
+
+# --- 6B: Smoking Status ---
+smoking_sql = f"""
+WITH smoking_obs AS (
+    SELECT
+        o.person_id,
+        o.observation_concept_id,
+        c.concept_name AS smoking_status,
+        o.observation_datetime,
+        ROW_NUMBER() OVER (
+            PARTITION BY o.person_id
+            ORDER BY o.observation_datetime DESC
+        ) AS rn
+    FROM `{CDR}.observation` o
+    JOIN `{CDR}.concept` c ON o.value_as_concept_id = c.concept_id
+    WHERE o.observation_concept_id IN {SMOKING_CONCEPT_IDS}
+)
+SELECT person_id, smoking_status
+FROM smoking_obs
+WHERE rn = 1
+"""
+
+print("⏳ Extracting smoking status...")
+smoking_df = pd.read_gbq(smoking_sql, dialect="standard",
+                           use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                           progress_bar_type="tqdm_notebook")
+cohort_df = cohort_df.merge(smoking_df, on='person_id', how='left')
+
+# --- 6C: Income / Socioeconomic Data (survey) ---
+income_sql = f"""
+SELECT DISTINCT
+    person_id,
+    answer AS income_level
+FROM `{CDR}.ds_survey`
+WHERE question_concept_id IN (
+    SELECT concept_id FROM `{CDR}.concept`
+    WHERE LOWER(concept_name) LIKE '%annual%income%'
+      AND domain_id = 'Observation'
+)
+"""
+
+print("⏳ Extracting income/SES data...")
+try:
+    income_df = pd.read_gbq(income_sql, dialect="standard",
+                              use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                              progress_bar_type="tqdm_notebook")
+    income_df = income_df.drop_duplicates(subset='person_id', keep='first')
+    cohort_df = cohort_df.merge(income_df, on='person_id', how='left')
+    print(f"   Income data available for: {cohort_df['income_level'].notna().sum():,}")
+except Exception as e:
+    print(f"   ⚠️ Income query issue: {e}")
+    cohort_df['income_level'] = np.nan
+
+# --- 6D: Incident T2DM (as covariate, NOT exclusion — post-pregnancy) ---
+t2dm_post_sql = f"""
+WITH first_pregnancy AS (
+    SELECT person_id, MIN(condition_start_datetime) AS first_preg_date
+    FROM `{CDR}.condition_occurrence`
+    WHERE condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {PREGNANCY_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY person_id
+)
+SELECT DISTINCT co.person_id, 1 AS incident_t2dm
+FROM `{CDR}.condition_occurrence` co
+JOIN first_pregnancy fp ON co.person_id = fp.person_id
+WHERE co.condition_concept_id IN (
+    SELECT DISTINCT c.concept_id
+    FROM `{CDR}.cb_criteria` c
+    JOIN (
+        SELECT CAST(cr.id AS STRING) AS id
+        FROM `{CDR}.cb_criteria` cr
+        WHERE concept_id IN {T2DM_CONCEPT_IDS}
+          AND full_text LIKE '%_rank1]%'
+    ) a ON (
+        c.path LIKE CONCAT('%.', a.id, '.%')
+        OR c.path LIKE CONCAT('%.', a.id)
+        OR c.path LIKE CONCAT(a.id, '.%')
+        OR c.path = a.id
+    )
+    WHERE is_standard = 1 AND is_selectable = 1
+)
+AND co.condition_start_datetime > fp.first_preg_date
+"""
+
+print("⏳ Extracting incident T2DM (post-pregnancy covariate)...")
+t2dm_df = pd.read_gbq(t2dm_post_sql, dialect="standard",
+                        use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                        progress_bar_type="tqdm_notebook")
+cohort_df = cohort_df.merge(t2dm_df, on='person_id', how='left')
+cohort_df['incident_t2dm'] = cohort_df['incident_t2dm'].fillna(0).astype(int)
+
+# --- 6E: Exclude missing key covariates (BMI, age) ---
+n_before = len(cohort_df)
+cohort_df = cohort_df.dropna(subset=['bmi', 'age'])
+n_after = len(cohort_df)
+print(f"\n❌ Excluded for missing BMI/age: {n_before - n_after:,}")
+print(f"📊 FINAL ANALYTIC COHORT: {n_after:,}")
+print(f"   GDM:    {cohort_df['gdm_exposure'].sum():,}")
+print(f"   No-GDM: {(cohort_df['gdm_exposure'] == 0).sum():,}")
+
+# %% ── Cell 7: Extract CVD Outcomes (Post-Pregnancy) ───────
+
+outcomes_sql = f"""
+WITH first_pregnancy AS (
+    SELECT person_id, MIN(condition_start_datetime) AS first_preg_date
+    FROM `{CDR}.condition_occurrence`
+    WHERE condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {PREGNANCY_CONCEPT_IDS}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY person_id
+),
+htn AS (
+    SELECT DISTINCT co.person_id, 1 AS incident_htn,
+           MIN(co.condition_start_datetime) OVER (PARTITION BY co.person_id) AS htn_date
+    FROM `{CDR}.condition_occurrence` co
+    JOIN first_pregnancy fp ON co.person_id = fp.person_id
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (SELECT CAST(cr.id AS STRING) AS id FROM `{CDR}.cb_criteria` cr
+              WHERE concept_id IN {HTN_CONCEPT_IDS} AND full_text LIKE '%_rank1]%') a
+        ON (c.path LIKE CONCAT('%.', a.id, '.%') OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%') OR c.path = a.id)
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    AND co.condition_start_datetime > fp.first_preg_date
+),
+cad AS (
+    SELECT DISTINCT co.person_id, 1 AS incident_cad,
+           MIN(co.condition_start_datetime) OVER (PARTITION BY co.person_id) AS cad_date
+    FROM `{CDR}.condition_occurrence` co
+    JOIN first_pregnancy fp ON co.person_id = fp.person_id
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (SELECT CAST(cr.id AS STRING) AS id FROM `{CDR}.cb_criteria` cr
+              WHERE concept_id IN {CAD_CONCEPT_IDS} AND full_text LIKE '%_rank1]%') a
+        ON (c.path LIKE CONCAT('%.', a.id, '.%') OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%') OR c.path = a.id)
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    AND co.condition_start_datetime > fp.first_preg_date
+),
+stroke AS (
+    SELECT DISTINCT co.person_id, 1 AS incident_stroke,
+           MIN(co.condition_start_datetime) OVER (PARTITION BY co.person_id) AS stroke_date
+    FROM `{CDR}.condition_occurrence` co
+    JOIN first_pregnancy fp ON co.person_id = fp.person_id
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (SELECT CAST(cr.id AS STRING) AS id FROM `{CDR}.cb_criteria` cr
+              WHERE concept_id IN {STROKE_CONCEPT_IDS} AND full_text LIKE '%_rank1]%') a
+        ON (c.path LIKE CONCAT('%.', a.id, '.%') OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%') OR c.path = a.id)
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    AND co.condition_start_datetime > fp.first_preg_date
+),
+hf AS (
+    SELECT DISTINCT co.person_id, 1 AS incident_hf,
+           MIN(co.condition_start_datetime) OVER (PARTITION BY co.person_id) AS hf_date
+    FROM `{CDR}.condition_occurrence` co
+    JOIN first_pregnancy fp ON co.person_id = fp.person_id
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (SELECT CAST(cr.id AS STRING) AS id FROM `{CDR}.cb_criteria` cr
+              WHERE concept_id IN {HF_CONCEPT_IDS} AND full_text LIKE '%_rank1]%') a
+        ON (c.path LIKE CONCAT('%.', a.id, '.%') OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%') OR c.path = a.id)
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    AND co.condition_start_datetime > fp.first_preg_date
+)
+SELECT
+    p.person_id,
+    COALESCE(h.incident_htn, 0) AS incident_htn,
+    COALESCE(c.incident_cad, 0) AS incident_cad,
+    COALESCE(s.incident_stroke, 0) AS incident_stroke,
+    COALESCE(f.incident_hf, 0) AS incident_hf
+FROM (SELECT DISTINCT person_id FROM `{CDR}.person`) p
+LEFT JOIN (SELECT DISTINCT person_id, incident_htn FROM htn) h ON p.person_id = h.person_id
+LEFT JOIN (SELECT DISTINCT person_id, incident_cad FROM cad) c ON p.person_id = c.person_id
+LEFT JOIN (SELECT DISTINCT person_id, incident_stroke FROM stroke) s ON p.person_id = s.person_id
+LEFT JOIN (SELECT DISTINCT person_id, incident_hf FROM hf) f ON p.person_id = f.person_id
+"""
+
+print("⏳ Extracting CVD outcomes...")
+outcomes_df = pd.read_gbq(outcomes_sql, dialect="standard",
+                            use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                            progress_bar_type="tqdm_notebook")
+
+cohort_df = cohort_df.merge(outcomes_df, on='person_id', how='left')
+
+for col in ['incident_htn', 'incident_cad', 'incident_stroke', 'incident_hf']:
+    cohort_df[col] = cohort_df[col].fillna(0).astype(int)
+
+cohort_df['any_cvd'] = (
+    (cohort_df['incident_htn'] == 1) |
+    (cohort_df['incident_cad'] == 1) |
+    (cohort_df['incident_stroke'] == 1) |
+    (cohort_df['incident_hf'] == 1)
+).astype(int)
+
+print("✅ Outcomes merged")
+print(cohort_df[['incident_htn','incident_cad','incident_stroke','incident_hf','any_cvd']].sum())
+
+# %% ── Cell 8: CONSORT Flow Diagram Numbers ────────────────
+
+print("=" * 55)
+print("         CONSORT-STYLE COHORT FLOW")
+print("=" * 55)
+print(f"Female, 25–65, alive, with pregnancy: {len(base_cohort_df):,}")
+print(f"  ❌ Pre-existing CVD:                 {len(exclude_cvd):,}")
+print(f"  ❌ Pre-existing T1DM/T2DM:           {len(exclude_dm):,}")
+print(f"  ❌ Missing BMI or age:               {n_before - n_after:,}")
+print(f"─────────────────────────────────────────────")
+print(f"  ✅ Final analytic cohort:            {len(cohort_df):,}")
+print(f"     → GDM (exposed):                 {cohort_df['gdm_exposure'].sum():,}")
+print(f"     → No GDM (comparison):           {(cohort_df['gdm_exposure']==0).sum():,}")
+print("=" * 55)
+
+# %% ── Cell 9: Table 1 — Baseline Characteristics ──────────
+
+def table1_summary(df, group_col='gdm_exposure'):
+    """Generate Table 1 comparing GDM vs No-GDM groups."""
+    groups = {1: 'GDM', 0: 'No GDM'}
+    results = []
+
+    for val, label in groups.items():
+        g = df[df[group_col] == val]
+        n = len(g)
+        results.append({
+            'Characteristic': 'N',
+            label: f"{n:,}"
+        })
+        results.append({
+            'Characteristic': 'Age, mean ± SD',
+            label: f"{pd.to_numeric(g['age'], errors='coerce').mean():.1f} ± {pd.to_numeric(g['age'], errors='coerce').std():.1f}"
+        })
+        results.append({
+            'Characteristic': 'BMI, mean ± SD',
+            label: f"{pd.to_numeric(g['bmi'], errors='coerce').mean():.1f} ± {pd.to_numeric(g['bmi'], errors='coerce').std():.1f}"
+        })
+        for race_val in df['race'].dropna().unique():
+            count = (g['race'] == race_val).sum()
+            pct = count / n * 100 if n > 0 else 0
+            results.append({
+                'Characteristic': f'Race: {race_val}',
+                label: f"{count:,} ({pct:.1f}%)"
+            })
+        for eth in df['ethnicity'].dropna().unique():
+            count = (g['ethnicity'] == eth).sum()
+            pct = count / n * 100 if n > 0 else 0
+            results.append({
+                'Characteristic': f'Ethnicity: {eth}',
+                label: f"{count:,} ({pct:.1f}%)"
+            })
+        t2dm_n = g['incident_t2dm'].sum()
+        results.append({
+            'Characteristic': 'Incident T2DM, n (%)',
+            label: f"{t2dm_n:,} ({t2dm_n/n*100:.1f}%)" if n > 0 else "0"
+        })
+        for outcome, name in [('incident_htn','Incident HTN'),
+                               ('incident_cad','Incident CAD'),
+                               ('incident_stroke','Incident Stroke'),
+                               ('incident_hf','Incident HF'),
+                               ('any_cvd','Any CVD (composite)')]:
+            o_n = g[outcome].sum()
+            results.append({
+                'Characteristic': f'{name}, n (%)',
+                label: f"{o_n:,} ({o_n/n*100:.1f}%)" if n > 0 else "0"
+            })
+
+    gdm_rows = [r for r in results if 'GDM' in r]
+    nogdm_rows = [r for r in results if 'No GDM' in r]
+
+    table = pd.DataFrame(gdm_rows).merge(
+        pd.DataFrame(nogdm_rows),
+        on='Characteristic', how='outer'
+    )
+    return table
+
+table1 = table1_summary(cohort_df)
+print("\n📋 TABLE 1: Baseline Characteristics by GDM Status\n")
+print(table1.to_string(index=False))
+
+# %% ── Cell 10: Statistical Comparisons (Bivariate) ────────
+
+print("\n📊 BIVARIATE COMPARISONS\n")
+
+# Force numeric conversion at the DataFrame level BEFORE splitting
+cohort_df['age'] = cohort_df['age'].astype(float)
+cohort_df['bmi'] = cohort_df['bmi'].astype(float)
+for col in ['incident_htn', 'incident_cad', 'incident_stroke', 'incident_hf', 'any_cvd', 'gdm_exposure', 'incident_t2dm']:
+    cohort_df[col] = cohort_df[col].astype(int)
+
+# Verify dtypes fixed
+print("Dtype check:")
+print(f"  age: {cohort_df['age'].dtype}, bmi: {cohort_df['bmi'].dtype}")
+
+gdm = cohort_df[cohort_df['gdm_exposure'] == 1]
+no_gdm = cohort_df[cohort_df['gdm_exposure'] == 0]
+
+# Age comparison — use .values to pass raw numpy arrays
+t_age, p_age = stats.ttest_ind(gdm['age'].values, no_gdm['age'].values)
+print(f"Age: t = {t_age:.3f}, p = {p_age:.4f}")
+
+# BMI comparison
+t_bmi, p_bmi = stats.ttest_ind(gdm['bmi'].values, no_gdm['bmi'].values)
+print(f"BMI: t = {t_bmi:.3f}, p = {p_bmi:.4f}")
+
+# CVD outcome comparisons (chi-square)
+for outcome, name in [('incident_htn', 'Hypertension'),
+                       ('incident_cad', 'CAD'),
+                       ('incident_stroke', 'Stroke'),
+                       ('incident_hf', 'Heart Failure'),
+                       ('any_cvd', 'Any CVD (composite)')]:
+    ct = pd.crosstab(cohort_df['gdm_exposure'], cohort_df[outcome])
+    chi2, p, dof, expected = chi2_contingency(ct)
+    print(f"{name}: χ² = {chi2:.3f}, p = {p:.4f}")
+
+# %% ── Cell 11: Multivariable Logistic Regression ──────────
+
+print("\n📈 MULTIVARIABLE LOGISTIC REGRESSION\n")
+
+analysis_df = cohort_df.copy()
+
+# Ensure numeric
+for col in ['age', 'bmi', 'gdm_exposure', 'incident_t2dm',
+            'incident_htn', 'incident_cad', 'incident_stroke', 'incident_hf', 'any_cvd']:
+    analysis_df[col] = analysis_df[col].astype(float)
+
+# Encode smoking (binary: ever vs never)
+analysis_df['smoker_ever'] = analysis_df['smoking_status'].apply(
+    lambda x: 1 if isinstance(x, str) and ('current' in x.lower() or 'former' in x.lower()) else 0
+).astype(float)
+
+# ── Simplify race into clean categories to avoid singular matrix ──
+def clean_race(r):
+    if pd.isna(r):
+        return 'Unknown'
+    r = str(r)
+    if 'White' in r:
+        return 'White'
+    elif 'Black' in r:
+        return 'Black'
+    elif 'Asian' in r:
+        return 'Asian'
+    elif 'Hispanic' in r:
+        return 'Hispanic'
+    elif 'American Indian' in r or 'Alaska' in r:
+        return 'AIAN'
+    elif 'Pacific' in r or 'Hawaiian' in r:
+        return 'NHPI'
+    elif 'More than one' in r:
+        return 'Multiracial'
+    elif 'Middle Eastern' in r:
+        return 'MENA'
+    else:
+        return 'Unknown'
+
+analysis_df['race_clean'] = analysis_df['race'].apply(clean_race)
+
+# Simplify ethnicity
+def clean_ethnicity(e):
+    if pd.isna(e):
+        return 'Unknown'
+    e = str(e)
+    if 'Hispanic' in e and 'Not' not in e:
+        return 'Hispanic'
+    elif 'Not Hispanic' in e:
+        return 'Not Hispanic'
+    else:
+        return 'Unknown'
+
+analysis_df['eth_clean'] = analysis_df['ethnicity'].apply(clean_ethnicity)
+
+# Create dummies (drop_first=True to avoid perfect collinearity)
+race_dummies = pd.get_dummies(analysis_df['race_clean'], prefix='race', drop_first=True, dtype=float)
+eth_dummies = pd.get_dummies(analysis_df['eth_clean'], prefix='eth', drop_first=True, dtype=float)
+analysis_df = pd.concat([analysis_df, race_dummies, eth_dummies], axis=1)
+
+# Build predictor list
+covariates = ['gdm_exposure', 'age', 'bmi', 'smoker_ever', 'incident_t2dm']
+covariates += list(race_dummies.columns)
+covariates += list(eth_dummies.columns)
+
+X = analysis_df[covariates].astype(float)
+X = sm.add_constant(X)
+
+# ── Check for collinearity before fitting ──
+print(f"Predictor matrix shape: {X.shape}")
+print(f"Matrix rank: {np.linalg.matrix_rank(X.values)}")
+print(f"Columns: {list(X.columns)}\n")
+
+# Drop any columns with zero variance
+zero_var = X.columns[X.std() == 0]
+if len(zero_var) > 0:
+    print(f"⚠️ Dropping zero-variance columns: {list(zero_var)}")
+    X = X.drop(columns=zero_var)
+
+# Check for perfect collinearity via condition number
+cond = np.linalg.cond(X.values)
+print(f"Condition number: {cond:.1f}")
+if cond > 1e10:
+    print("⚠️ High condition number — checking for redundant columns...")
+    # Use SVD to find near-zero singular values
+    from numpy.linalg import svd
+    U, s, Vt = svd(X.values, full_matrices=False)
+    tol = 1e-10
+    redundant_idx = np.where(s < tol)[0]
+    if len(redundant_idx) > 0:
+        # Find which columns contribute most to the near-zero singular vectors
+        for idx in redundant_idx:
+            col_idx = np.argmax(np.abs(Vt[idx]))
+            col_name = X.columns[col_idx]
+            print(f"   Dropping likely redundant column: {col_name}")
+            X = X.drop(columns=[col_name])
+
+print(f"\nFinal predictor matrix: {X.shape}")
+print(f"Final rank: {np.linalg.matrix_rank(X.values)}\n")
+
+# ── Fit models ──
+results_table = []
+
+for outcome, name in [('any_cvd', 'Any CVD (Composite)'),
+                       ('incident_htn', 'Hypertension'),
+                       ('incident_cad', 'CAD'),
+                       ('incident_stroke', 'Stroke'),
+                       ('incident_hf', 'Heart Failure')]:
+    y = analysis_df[outcome].astype(float)
+
+    try:
+        model = sm.Logit(y, X)
+        result = model.fit(disp=0, maxiter=300, method='newton')
+
+        or_val = np.exp(result.params['gdm_exposure'])
+        ci_low = np.exp(result.conf_int().loc['gdm_exposure', 0])
+        ci_high = np.exp(result.conf_int().loc['gdm_exposure', 1])
+        p_val = result.pvalues['gdm_exposure']
+
+        print(f"{'='*55}")
+        print(f"Outcome: {name}")
+        print(f"  GDM Adjusted OR: {or_val:.2f} (95% CI: {ci_low:.2f}–{ci_high:.2f})")
+        print(f"  p-value: {p_val:.4f}")
+        print(f"  Pseudo R²: {result.prsquared:.4f}")
+        print(f"  N events: {int(y.sum()):,} / {len(y):,}\n")
+
+        results_table.append({
+            'Outcome': name,
+            'Adjusted OR': f"{or_val:.2f}",
+            '95% CI': f"{ci_low:.2f}–{ci_high:.2f}",
+            'p-value': f"{p_val:.4f}",
+            'N events': f"{int(y.sum()):,}",
+            'Significant': '✅' if p_val < 0.05 else '—'
+        })
+
+        if outcome == 'any_cvd':
+            print("--- Full Model Summary (Composite CVD) ---")
+            print(result.summary2())
+
+    except Exception as e:
+        print(f"⚠️ Model for {name} failed: {e}")
+        results_table.append({
+            'Outcome': name, 'Adjusted OR': 'N/A', '95% CI': 'N/A',
+            'p-value': 'N/A', 'N events': f"{int(y.sum()):,}", 'Significant': '⚠️'
+        })
+
+results_summary = pd.DataFrame(results_table)
+print("\n" + "="*70)
+print("       SUMMARY: Adjusted ORs for GDM → CVD Outcomes")
+print("="*70)
+print(results_summary.to_string(index=False))
+
+# %% ── Cell 12: Sensitivity Analysis — Without T2DM ────────
+
+print("\n📊 SENSITIVITY ANALYSIS: Without T2DM as covariate\n")
+
+covariates_no_t2dm = [c for c in X.columns if c != 'incident_t2dm']
+X_sens = X[covariates_no_t2dm]
+
+for outcome, name in [('any_cvd', 'Any CVD'),
+                       ('incident_htn', 'Hypertension'),
+                       ('incident_cad', 'CAD'),
+                       ('incident_stroke', 'Stroke'),
+                       ('incident_hf', 'Heart Failure')]:
+    y = analysis_df[outcome].astype(float)
+    try:
+        result = sm.Logit(y, X_sens).fit(disp=0, maxiter=300, method='newton')
+        or_val = np.exp(result.params['gdm_exposure'])
+        ci_low = np.exp(result.conf_int().loc['gdm_exposure', 0])
+        ci_high = np.exp(result.conf_int().loc['gdm_exposure', 1])
+        p_val = result.pvalues['gdm_exposure']
+        print(f"  {name}: OR = {or_val:.2f} (95% CI: {ci_low:.2f}–{ci_high:.2f}), p = {p_val:.4f}")
+    except Exception as e:
+        print(f"  {name}: ⚠️ {e}")
+
+# %% ── Cell 13: Visualization — Forest Plot ────────────────
+
+fig, ax = plt.subplots(figsize=(10, 6))
+
+outcomes_list = []
+ors = []
+ci_lows = []
+ci_highs = []
+
+for row in results_table:
+    if row['Adjusted OR'] != 'N/A':
+        outcomes_list.append(row['Outcome'])
+        or_val = float(row['Adjusted OR'])
+        ci_parts = row['95% CI'].split('–')
+        ors.append(or_val)
+        ci_lows.append(float(ci_parts[0]))
+        ci_highs.append(float(ci_parts[1]))
+
+y_pos = range(len(outcomes_list))
+xerr_low = [ors[i] - ci_lows[i] for i in range(len(ors))]
+xerr_high = [ci_highs[i] - ors[i] for i in range(len(ors))]
+
+ax.errorbar(ors, y_pos, xerr=[xerr_low, xerr_high],
+            fmt='o', color='darkred', capsize=5, markersize=8, linewidth=2)
+ax.axvline(x=1, color='black', linestyle='--', linewidth=1, alpha=0.7)
+ax.set_yticks(list(y_pos))
+ax.set_yticklabels(outcomes_list, fontsize=12)
+ax.set_xlabel('Adjusted Odds Ratio (95% CI)', fontsize=13)
+ax.set_title('Association Between GDM and Incident CVD Outcomes\n(Adjusted for Age, BMI, Race, Ethnicity, Smoking, T2DM)',
+             fontsize=14, fontweight='bold')
+ax.grid(axis='x', alpha=0.3)
+
+for i in range(len(ors)):
+    ax.annotate(f"OR={ors[i]:.2f}", (ors[i], i), textcoords="offset points",
+                xytext=(10, 10), fontsize=10, color='darkred')
+
+plt.tight_layout()
+plt.savefig('gdm_cvd_forest_plot.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("✅ Forest plot saved: gdm_cvd_forest_plot.png")
+
+# %% ── Cell 14: Visualization — Outcome Proportions ────────
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+outcomes_names = ['Hypertension', 'CAD', 'Stroke', 'Heart Failure', 'Any CVD']
+outcome_cols = ['incident_htn', 'incident_cad', 'incident_stroke', 'incident_hf', 'any_cvd']
+
+gdm_pcts = [pd.to_numeric(gdm[c], errors='coerce').mean()*100 for c in outcome_cols]
+nogdm_pcts = [pd.to_numeric(no_gdm[c], errors='coerce').mean()*100 for c in outcome_cols]
+
+x = np.arange(len(outcomes_names))
+width = 0.35
+
+bars1 = axes[0].bar(x - width/2, gdm_pcts, width, label='GDM', color='#e74c3c', alpha=0.85)
+bars2 = axes[0].bar(x + width/2, nogdm_pcts, width, label='No GDM', color='#3498db', alpha=0.85)
+
+axes[0].set_ylabel('Prevalence (%)', fontsize=12)
+axes[0].set_title('CVD Outcome Prevalence by GDM Status', fontsize=13, fontweight='bold')
+axes[0].set_xticks(x)
+axes[0].set_xticklabels(outcomes_names, rotation=30, ha='right')
+axes[0].legend()
+axes[0].grid(axis='y', alpha=0.3)
+
+axes[1].hist(pd.to_numeric(gdm['bmi'], errors='coerce').dropna(), bins=30, alpha=0.6,
+             label='GDM', color='#e74c3c', density=True)
+axes[1].hist(pd.to_numeric(no_gdm['bmi'], errors='coerce').dropna(), bins=30, alpha=0.6,
+             label='No GDM', color='#3498db', density=True)
+axes[1].set_xlabel('BMI (kg/m²)', fontsize=12)
+axes[1].set_ylabel('Density', fontsize=12)
+axes[1].set_title('BMI Distribution by GDM Status', fontsize=13, fontweight='bold')
+axes[1].legend()
+axes[1].grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('gdm_cvd_descriptive_plots.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("✅ Descriptive plots saved")
+
+# %% ── Cell 15: Export Analytic Dataset ─────────────────────
+
+export_cols = [
+    'person_id', 'age', 'race', 'ethnicity', 'bmi',
+    'smoking_status', 'income_level', 'gdm_exposure', 'incident_t2dm',
+    'incident_htn', 'incident_cad', 'incident_stroke', 'incident_hf', 'any_cvd'
+]
+
+export_df = cohort_df[[c for c in export_cols if c in cohort_df.columns]]
+export_df.to_csv('gdm_cvd_analytic_cohort.csv', index=False)
+print(f"✅ Analytic cohort exported: {len(export_df):,} rows")
+print(f"   Columns: {list(export_df.columns)}")
+
+# %% ── Cell 16: Final Summary ──────────────────────────────
+
+print("""
+╔══════════════════════════════════════════════════════════╗
+║         GDM → CVD STUDY — ANALYSIS COMPLETE             ║
+╠══════════════════════════════════════════════════════════╣
+║                                                          ║
+║  ✅ Cohort built with inclusion/exclusion criteria       ║
+║  ✅ GDM exposure from EHR + survey data                  ║
+║  ✅ CVD outcomes extracted (HTN, CAD, Stroke, HF)        ║
+║  ✅ Covariates: age, BMI, race, ethnicity, smoking, T2DM ║
+║  ✅ Table 1 generated                                    ║
+║  ✅ Bivariate comparisons (t-test, chi-square)           ║
+║  ✅ Multivariable logistic regression (adjusted ORs)     ║
+║  ✅ Sensitivity analysis (without T2DM mediator)         ║
+║  ✅ Forest plot + descriptive visualizations              ║
+║  ✅ Analytic dataset exported                             ║
+║                                                          ║
+║  IMPORTANT NOTES:                                        ║
+║  • Verify OMOP concept IDs in your workspace before run  ║
+║  • ds_survey table queries may need PPI concept updates  ║
+║  • Consider propensity score matching as extension       ║
+║  • Add Kaplan-Meier survival analysis if time-to-event   ║
+║    data is sufficient                                    ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+""")
