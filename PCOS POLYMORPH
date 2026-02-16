@@ -1,0 +1,898 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+PCOS POLYMORPHISM ANALYSIS — SEPARATE CODE
+All of Us Research Program | CDR: C2024Q3R8
+================================================================================
+ANALYSES:
+  Part A: Discover PCOS-related variants (gene-based search)
+  Part B: Assign polymorphism groups to patients
+  Part C: Each polymorphism vs all-others vs no-polymorphism
+  Part D: Between-polymorphism group comparison on all variables
+  Part E: Drug response by polymorphism group
+  Part F: Snapped analysis (all values per patient, ≥1 datapoint)
+  Part G: Polymorphism × BMI interaction
+  Part H: Polymorphism × Race interaction
+  Part I: OR/RR analyses
+  Part J: Export all tables
+================================================================================
+"""
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+from itertools import combinations
+import os, warnings
+warnings.filterwarnings('ignore')
+
+dataset = os.environ.get("WORKSPACE_CDR")
+print(f"CDR: {dataset}")
+
+# ════════════════════════════════════════════════════════════════
+# VERIFIED CONCEPT IDS
+# ════════════════════════════════════════════════════════════════
+PCOS_IDS = [40443308, 36683296]
+METFORMIN_ID = [1503297]
+GLP1_IDS = [793143, 40170911, 45774435, 1583722, 779705, 44506754, 44816332]
+pcos_ids_str = ','.join(str(i) for i in PCOS_IDS)
+met_ids_str = ','.join(str(i) for i in METFORMIN_ID)
+glp1_ids_str = ','.join(str(i) for i in GLP1_IDS)
+
+MEASUREMENT_MAP = {
+    'Blood_Glucose': [3004501, 3000483],
+    'HbA1c': [3004410],
+    'Triglycerides': [3022192],
+    'LDL': [3028288, 3028437],
+    'HDL': [3007070],
+    'Total_Cholesterol': [3027114],
+    'FSH': [4149280, 40484118],
+    'LH': [4287388],
+    'Estradiol': [3025285],
+    'Testosterone': [3008893],
+    'Free_Testosterone': [3016049],
+    'DHEA_S': [3015884],
+    'Cortisol': [3009682],
+    'Iron': [3002400],
+    'Ferritin': [3001122],
+    'TIBC': [3021044],
+    'Folate': [3036987],
+    'Vitamin_B12': [3000593],
+    'Vitamin_D': [3020149, 40765040],
+    'Magnesium': [3001420],
+    'AMH': [3047826],
+    'Insulin': [3016244],
+    'CRP': [3020460],
+    'ALT': [3006923],
+    'AST': [3013721],
+    'TSH': [3009201],
+}
+
+ALL_MEAS_IDS = []
+MEAS_ID_TO_LABEL = {}
+for label, ids in MEASUREMENT_MAP.items():
+    for cid in ids:
+        ALL_MEAS_IDS.append(cid)
+        MEAS_ID_TO_LABEL[cid] = label
+ALL_MEAS_IDS_STR = ','.join(str(i) for i in ALL_MEAS_IDS)
+
+PRE_WINDOW = 180
+POST_START = 180
+POST_END = 730
+
+# ════════════════════════════════════════════════════════════════
+# STATISTICAL HELPERS
+# ════════════════════════════════════════════════════════════════
+
+def wilcoxon_within(group_df):
+    results = []
+    for meas in group_df['measurement_label'].unique():
+        sub = group_df[group_df['measurement_label'] == meas].dropna(subset=['pre_value','post_value'])
+        n = len(sub)
+        if n < 5: continue
+        diff = sub['post_value'] - sub['pre_value']
+        if diff.std() == 0: continue
+        try:
+            stat, pval = stats.wilcoxon(diff, alternative='two-sided')
+        except: continue
+        z = stats.norm.ppf(pval/2) if pval > 0 else np.nan
+        r_eff = abs(z)/np.sqrt(n) if not np.isnan(z) else np.nan
+        results.append({
+            'measurement': meas, 'n': n,
+            'median_pre': round(sub['pre_value'].median(),2),
+            'median_post': round(sub['post_value'].median(),2),
+            'median_change': round(diff.median(),2),
+            'effect_r': round(r_eff,3),
+            'p_raw': pval
+        })
+    if not results: return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'], method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+def kruskal_between(paired_df, arms_col='group'):
+    results = []
+    for meas in paired_df['measurement_label'].unique():
+        sub = paired_df[paired_df['measurement_label'] == meas].dropna(subset=['pre_value','post_value']).copy()
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        groups, labels = [], []
+        for arm in sub[arms_col].unique():
+            g = sub[sub[arms_col]==arm]['change']
+            if len(g) >= 5:
+                groups.append(g); labels.append(arm)
+        if len(groups) < 2: continue
+        try:
+            stat, pval = stats.kruskal(*groups)
+        except: continue
+        N = sum(len(g) for g in groups)
+        eta = max((stat - len(groups) + 1)/(N-1), 0) if N > 1 else np.nan
+        results.append({
+            'measurement': meas, 'n_groups': len(groups), 'n_total': N,
+            'H_stat': round(stat,2), 'eta_sq': round(eta,4),
+            'p_raw': pval, 'groups': ', '.join(labels)
+        })
+    if not results: return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'], method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+def mw_two(g1, g2, l1, l2, meas):
+    """Mann-Whitney U for two groups; returns dict or None."""
+    if len(g1) < 5 or len(g2) < 5: return None
+    try:
+        stat, pval = stats.mannwhitneyu(g1, g2, alternative='two-sided')
+    except: return None
+    return {'measurement': meas, 'group_1': l1, 'group_2': l2,
+            'n_1': len(g1), 'n_2': len(g2),
+            'median_1': round(g1.median(),2), 'median_2': round(g2.median(),2),
+            'diff': round(g1.median()-g2.median(),2), 'p_raw': pval}
+
+def fdr_correct(df):
+    if len(df) == 0: return df
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'].fillna(1), method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART A: DISCOVER PCOS-RELATED VARIANTS                                       ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("="*80)
+print("PART A: Discovering PCOS-related variants")
+print("="*80)
+
+PCOS_GENES = [
+    'DENND1A','THADA','LHCGR','FSHR','INSR','FTO','TCF7L2',
+    'HMGA2','C9orf3','RAB5B','SUOX','TOX3','YAP1','ERBB4',
+    'FSHB','RAD50','KRR1','GATA4','NEIL2','ARL14EP',
+    'AMH','AMHR2','AR','CYP11A1','CYP17A1','CYP19A1',
+    'SRD5A1','SRD5A2','SHBG','CAPN10','ADIPOQ'
+]
+genes_str = "','".join(PCOS_GENES)
+
+variant_q = f"""
+SELECT vg.vid, vg.gene_symbol,
+       va.contig, va.position, va.ref_allele, va.alt_allele,
+       va.consequence, va.cons_str, va.clinical_significance_string,
+       va.allele_frequency, va.participant_count
+FROM `{dataset}.cb_variant_attribute_genes` vg
+JOIN `{dataset}.cb_variant_attribute` va ON vg.vid = va.vid
+WHERE vg.gene_symbol IN ('{genes_str}')
+  AND va.participant_count >= 50
+ORDER BY va.participant_count DESC
+LIMIT 500
+"""
+try:
+    variants_df = pd.read_gbq(variant_q, dialect='standard', progress_bar_type='tqdm')
+    print(f"Found {len(variants_df)} variants in PCOS genes (≥50 carriers)")
+    print(f"Genes: {variants_df['gene_symbol'].nunique()}")
+    print(variants_df.head(20)[['vid','gene_symbol','contig','position',
+        'consequence','clinical_significance_string','allele_frequency','participant_count']].to_string(index=False))
+except Exception as e:
+    print(f"Error: {e}")
+    variants_df = pd.DataFrame()
+
+# Known PCOS GWAS SNPs
+known_rs = ['rs2479106','rs13405728','rs13429458','rs2268361',
+            'rs12478601','rs7578326','rs1799817','rs9939609',
+            'rs7903146','rs1353517','rs705702']
+rs_str = "','".join(known_rs)
+
+rs_q = f"""
+SELECT rs.vid, rs.rs_number, va.contig, va.position, va.ref_allele, va.alt_allele,
+       va.consequence, va.clinical_significance_string, va.allele_frequency,
+       va.participant_count, vg.gene_symbol
+FROM `{dataset}.cb_variant_attribute_rs_number` rs
+JOIN `{dataset}.cb_variant_attribute` va ON rs.vid = va.vid
+LEFT JOIN `{dataset}.cb_variant_attribute_genes` vg ON rs.vid = vg.vid
+WHERE rs.rs_number IN ('{rs_str}')
+ORDER BY va.participant_count DESC
+"""
+try:
+    rs_df = pd.read_gbq(rs_q, dialect='standard', progress_bar_type='tqdm')
+    print(f"\nKnown GWAS SNPs found: {len(rs_df)}")
+    if len(rs_df) > 0:
+        print(rs_df.to_string(index=False))
+except:
+    rs_df = pd.DataFrame()
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART B: ASSIGN POLYMORPHISM GROUPS                                            ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART B: Assigning polymorphism groups to PCOS patients")
+print("="*80)
+
+# Select top variants: up to 3 per gene, top 15 genes
+if len(variants_df) > 0:
+    top_v = variants_df.sort_values('participant_count', ascending=False)
+    selected = []
+    for gene in top_v['gene_symbol'].unique()[:15]:
+        selected.append(top_v[top_v['gene_symbol']==gene].head(3))
+    selected_variants = pd.concat(selected).head(30)
+    print(f"Selected {len(selected_variants)} variants across {selected_variants['gene_symbol'].nunique()} genes")
+    selected_vids = selected_variants['vid'].tolist()
+else:
+    selected_vids = []
+    selected_variants = pd.DataFrame()
+
+# Get person-variant mapping
+pv_exploded = pd.DataFrame()
+if selected_vids:
+    vids_str = "','".join(str(v) for v in selected_vids)
+    pv_q = f"""
+    SELECT vtp.vid, vtp.person_ids, vg.gene_symbol
+    FROM `{dataset}.cb_variant_to_person` vtp
+    LEFT JOIN `{dataset}.cb_variant_attribute_genes` vg ON vtp.vid = vg.vid
+    WHERE vtp.vid IN ('{vids_str}')
+    """
+    try:
+        pv_raw = pd.read_gbq(pv_q, dialect='standard', progress_bar_type='tqdm')
+        if len(pv_raw) > 0:
+            sample = pv_raw['person_ids'].iloc[0]
+            print(f"person_ids format: {type(sample)} — {str(sample)[:80]}")
+            if isinstance(sample, str):
+                pv_exploded = pv_raw.assign(person_id=pv_raw['person_ids'].str.split(',')).explode('person_id')
+                pv_exploded['person_id'] = pd.to_numeric(pv_exploded['person_id'].str.strip(), errors='coerce')
+            elif isinstance(sample, (list, np.ndarray)):
+                pv_exploded = pv_raw.explode('person_ids').rename(columns={'person_ids':'person_id'})
+                pv_exploded['person_id'] = pd.to_numeric(pv_exploded['person_id'], errors='coerce')
+            else:
+                pv_exploded = pv_raw.rename(columns={'person_ids':'person_id'})
+                pv_exploded['person_id'] = pd.to_numeric(pv_exploded['person_id'], errors='coerce')
+            pv_exploded = pv_exploded.dropna(subset=['person_id'])
+            pv_exploded['person_id'] = pv_exploded['person_id'].astype(int)
+            print(f"Exploded: {len(pv_exploded)} rows, {pv_exploded['person_id'].nunique()} unique patients")
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Build PCOS cohort
+cohort_q = f"""
+WITH pcos_dx AS (
+    SELECT person_id, MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str}) GROUP BY person_id
+),
+demo AS (
+    SELECT p.person_id, p.year_of_birth,
+           COALESCE(c.concept_name,'Unknown') AS race
+    FROM `{dataset}.person` p
+    LEFT JOIN `{dataset}.concept` c ON p.race_concept_id = c.concept_id
+    WHERE p.gender_concept_id = 45878463
+)
+SELECT pd.person_id, pd.pcos_index_date,
+       EXTRACT(YEAR FROM pd.pcos_index_date) - d.year_of_birth AS age_at_dx, d.race
+FROM pcos_dx pd JOIN demo d ON pd.person_id = d.person_id
+WHERE (EXTRACT(YEAR FROM pd.pcos_index_date) - d.year_of_birth) BETWEEN 18 AND 50
+"""
+cohort = pd.read_gbq(cohort_q, dialect='standard', progress_bar_type='tqdm')
+print(f"PCOS cohort: {len(cohort)} patients")
+
+def classify_race(r):
+    if r is None: return 'Other'
+    r = r.lower()
+    if 'white' in r: return 'White'
+    elif 'black' in r or 'african' in r: return 'Black'
+    elif 'asian' in r: return 'Asian'
+    elif 'hispanic' in r or 'latino' in r: return 'Hispanic'
+    else: return 'Other'
+cohort['race_cat'] = cohort['race'].apply(classify_race)
+
+# Drug arms
+drug_q = f"""
+WITH ci AS (SELECT person_id, MIN(condition_start_date) AS idx
+    FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}) GROUP BY person_id),
+met AS (SELECT DISTINCT de.person_id, 'met' AS dc FROM `{dataset}.drug_exposure` de
+    JOIN `{dataset}.concept_ancestor` ca ON de.drug_concept_id = ca.descendant_concept_id
+    JOIN ci ON de.person_id = ci.person_id
+    WHERE ca.ancestor_concept_id IN ({met_ids_str})
+      AND de.drug_exposure_start_date BETWEEN ci.idx AND DATE_ADD(ci.idx, INTERVAL 730 DAY)),
+glp AS (SELECT DISTINCT de.person_id, 'glp' AS dc FROM `{dataset}.drug_exposure` de
+    JOIN `{dataset}.concept_ancestor` ca ON de.drug_concept_id = ca.descendant_concept_id
+    JOIN ci ON de.person_id = ci.person_id
+    WHERE ca.ancestor_concept_id IN ({glp1_ids_str})
+      AND de.drug_exposure_start_date BETWEEN ci.idx AND DATE_ADD(ci.idx, INTERVAL 730 DAY))
+SELECT person_id, MAX(CASE WHEN dc='met' THEN 1 ELSE 0 END) AS has_met,
+       MAX(CASE WHEN dc='glp' THEN 1 ELSE 0 END) AS has_glp
+FROM (SELECT * FROM met UNION ALL SELECT * FROM glp) GROUP BY person_id
+"""
+drugs = pd.read_gbq(drug_q, dialect='standard', progress_bar_type='tqdm')
+def arm(r):
+    if r.get('has_met',0)==1 and r.get('has_glp',0)==1: return 'Combination'
+    elif r.get('has_glp',0)==1: return 'GLP1_RA'
+    elif r.get('has_met',0)==1: return 'Metformin'
+    else: return 'No_Therapy'
+if len(drugs) > 0:
+    drugs['treatment_arm'] = drugs.apply(arm, axis=1)
+    cohort = cohort.merge(drugs[['person_id','treatment_arm']], on='person_id', how='left')
+    cohort['treatment_arm'] = cohort['treatment_arm'].fillna('No_Therapy')
+else:
+    cohort['treatment_arm'] = 'No_Therapy'
+print(f"Treatment arms: {cohort['treatment_arm'].value_counts().to_dict()}")
+
+# BMI
+bmi_q = f"""
+WITH ci AS (SELECT person_id, MIN(condition_start_date) AS idx
+    FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}) GROUP BY person_id),
+ranked AS (
+    SELECT m.person_id, m.value_as_number AS bmi,
+           ROW_NUMBER() OVER (PARTITION BY m.person_id ORDER BY ABS(DATE_DIFF(m.measurement_date,ci.idx,DAY))) AS rn
+    FROM `{dataset}.measurement` m JOIN ci ON m.person_id = ci.person_id
+    WHERE m.measurement_concept_id IN (3038553,4245997) AND m.value_as_number BETWEEN 10 AND 80
+      AND m.measurement_date BETWEEN DATE_SUB(ci.idx, INTERVAL 365 DAY) AND DATE_ADD(ci.idx, INTERVAL 365 DAY))
+SELECT person_id, bmi FROM ranked WHERE rn=1
+"""
+bmi_df = pd.read_gbq(bmi_q, dialect='standard', progress_bar_type='tqdm')
+bmi_df['bmi_cat'] = bmi_df['bmi'].apply(lambda b: 'Underweight' if b<18.5 else ('Normal' if b<25 else ('Overweight' if b<30 else 'Obese')))
+cohort = cohort.merge(bmi_df, on='person_id', how='left')
+
+# Assign carrier flags
+carrier_cols = []
+if len(pv_exploded) > 0:
+    all_carriers = set(pv_exploded['person_id'].unique())
+    cohort['has_any_variant'] = cohort['person_id'].isin(all_carriers).astype(int)
+    
+    patient_genes = pv_exploded.groupby('person_id')['gene_symbol'].apply(set).reset_index()
+    patient_genes['n_variant_genes'] = patient_genes['gene_symbol'].apply(len)
+    cohort = cohort.merge(patient_genes[['person_id','n_variant_genes']], on='person_id', how='left')
+    cohort['n_variant_genes'] = cohort['n_variant_genes'].fillna(0).astype(int)
+    
+    for gene in selected_variants['gene_symbol'].unique():
+        gene_ids = set(pv_exploded[pv_exploded['gene_symbol']==gene]['person_id'])
+        col = f'carrier_{gene}'
+        cohort[col] = cohort['person_id'].isin(gene_ids).astype(int)
+        carrier_cols.append(col)
+    
+    print(f"\nVariant carriers in PCOS cohort: {cohort['has_any_variant'].sum()} ({cohort['has_any_variant'].mean()*100:.1f}%)")
+    for col in carrier_cols:
+        gene = col.replace('carrier_','')
+        print(f"  {gene}: {cohort[col].sum()}")
+else:
+    cohort['has_any_variant'] = 0
+    cohort['n_variant_genes'] = 0
+    print("⚠️ No variant data available.")
+
+# Pull measurements
+meas_q = f"""
+WITH ci AS (SELECT person_id, MIN(condition_start_date) AS idx
+    FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}) GROUP BY person_id)
+SELECT m.person_id, m.measurement_concept_id, m.value_as_number, m.measurement_date,
+       DATE_DIFF(m.measurement_date, ci.idx, DAY) AS days_from_index
+FROM `{dataset}.measurement` m JOIN ci ON m.person_id = ci.person_id
+WHERE m.measurement_concept_id IN ({ALL_MEAS_IDS_STR}) AND m.value_as_number IS NOT NULL
+  AND (m.measurement_date BETWEEN DATE_SUB(ci.idx, INTERVAL {PRE_WINDOW} DAY) AND ci.idx
+       OR m.measurement_date BETWEEN DATE_ADD(ci.idx, INTERVAL {POST_START} DAY) AND DATE_ADD(ci.idx, INTERVAL {POST_END} DAY))
+"""
+meas_raw = pd.read_gbq(meas_q, dialect='standard', progress_bar_type='tqdm')
+meas_raw['measurement_label'] = meas_raw['measurement_concept_id'].map(MEAS_ID_TO_LABEL)
+meas_raw['period'] = np.where(meas_raw['days_from_index'] <= 0, 'pre', 'post')
+print(f"Raw measurements: {len(meas_raw)}")
+
+# Paired pre/post
+agg = meas_raw.groupby(['person_id','measurement_label','period'])['value_as_number'].median().reset_index()
+agg.columns = ['person_id','measurement_label','period','value']
+pre = agg[agg['period']=='pre'].rename(columns={'value':'pre_value'}).drop('period',axis=1)
+post = agg[agg['period']=='post'].rename(columns={'value':'post_value'}).drop('period',axis=1)
+paired = pre.merge(post, on=['person_id','measurement_label'], how='inner')
+
+merge_cols = ['person_id','treatment_arm','race_cat','age_at_dx','bmi','bmi_cat',
+              'has_any_variant','n_variant_genes'] + carrier_cols
+paired = paired.merge(cohort[[c for c in merge_cols if c in cohort.columns]],
+                      on='person_id', how='left')
+print(f"Paired: {len(paired)} records, {paired['person_id'].nunique()} patients")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART C: EACH POLYMORPHISM vs ALL-OTHERS vs NO-POLYMORPHISM                   ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART C: Per-gene polymorphism analysis")
+print("="*80)
+
+gene_results = {}
+for col in carrier_cols:
+    gene = col.replace('carrier_','')
+    this_ids = set(cohort[cohort[col]==1]['person_id'])
+    all_ids = set(cohort[cohort['has_any_variant']==1]['person_id'])
+    other_ids = all_ids - this_ids
+    none_ids = set(cohort[cohort['has_any_variant']==0]['person_id'])
+    
+    sub = paired.copy()
+    sub['poly_group'] = 'No_Variant'
+    sub.loc[sub['person_id'].isin(this_ids), 'poly_group'] = f'{gene}'
+    sub.loc[sub['person_id'].isin(other_ids), 'poly_group'] = 'Other_variant'
+    
+    n_this = sub[sub['poly_group']==gene]['person_id'].nunique()
+    n_other = sub[sub['poly_group']=='Other_variant']['person_id'].nunique()
+    n_none = sub[sub['poly_group']=='No_Variant']['person_id'].nunique()
+    
+    if n_this < 5 or n_none < 5:
+        continue
+    
+    print(f"\n--- {gene}: carriers={n_this}, other_var={n_other}, no_var={n_none} ---")
+    bw = kruskal_between(sub, 'poly_group')
+    gene_results[gene] = {'between': bw, 'n_carrier': n_this, 'n_other': n_other, 'n_none': n_none}
+    
+    if len(bw) > 0:
+        sig = bw[bw['significant']]
+        if len(sig) > 0:
+            print(f"  Significant: {len(sig)}")
+            print(sig[['measurement','H_stat','p_adj']].to_string(index=False))
+        else:
+            print("  No significant between-group differences")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART D: BETWEEN ALL POLYMORPHISM GROUPS                                       ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART D: Between-gene group comparisons")
+print("="*80)
+
+if len(carrier_cols) >= 2:
+    p_poly = paired.copy()
+    p_poly['primary_gene'] = 'No_Variant'
+    for col in carrier_cols:
+        gene = col.replace('carrier_','')
+        mask = (p_poly[col]==1) & (p_poly['primary_gene']=='No_Variant')
+        p_poly.loc[mask, 'primary_gene'] = gene
+    
+    print("Primary gene assignments:")
+    print(p_poly.groupby('primary_gene')['person_id'].nunique().sort_values(ascending=False).to_string())
+    
+    between_genes = kruskal_between(p_poly, 'primary_gene')
+    if len(between_genes) > 0:
+        print(f"\nKruskal-Wallis across gene groups:")
+        print(between_genes.to_string(index=False))
+    
+    # Pairwise
+    genes_list = [c.replace('carrier_','') for c in carrier_cols] + ['No_Variant']
+    pw_results = []
+    for meas in p_poly['measurement_label'].unique():
+        sub = p_poly[p_poly['measurement_label']==meas].dropna(subset=['pre_value','post_value']).copy()
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        for g1, g2 in combinations(genes_list, 2):
+            d1 = sub[sub['primary_gene']==g1]['change']
+            d2 = sub[sub['primary_gene']==g2]['change']
+            r = mw_two(d1, d2, g1, g2, meas)
+            if r: pw_results.append(r)
+    if pw_results:
+        pw_df = fdr_correct(pd.DataFrame(pw_results))
+        sig_pw = pw_df[pw_df['significant']]
+        print(f"\nSignificant pairwise: {len(sig_pw)} of {len(pw_df)}")
+        if len(sig_pw) > 0:
+            print(sig_pw.head(25).to_string(index=False))
+else:
+    print("Fewer than 2 gene groups — skipping pairwise.")
+    pw_df = pd.DataFrame()
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART E: DRUG RESPONSE BY POLYMORPHISM GROUP                                   ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART E: Drug response by polymorphism group")
+print("="*80)
+
+drug_poly = {}
+for drug_arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    arm_data = paired[paired['treatment_arm']==drug_arm].copy()
+    if arm_data['person_id'].nunique() < 10:
+        print(f"\n{drug_arm}: <10 patients, skipping")
+        continue
+    arm_data['change'] = arm_data['post_value'] - arm_data['pre_value']
+    
+    print(f"\n--- {drug_arm} (n={arm_data['person_id'].nunique()}) ---")
+    
+    # Carrier vs non-carrier
+    results = []
+    for meas in arm_data['measurement_label'].unique():
+        c = arm_data[(arm_data['has_any_variant']==1)&(arm_data['measurement_label']==meas)]['change']
+        nc = arm_data[(arm_data['has_any_variant']==0)&(arm_data['measurement_label']==meas)]['change']
+        r = mw_two(c, nc, 'Carrier', 'Non_carrier', meas)
+        if r: results.append(r)
+    
+    if results:
+        df = fdr_correct(pd.DataFrame(results))
+        drug_poly[drug_arm] = df
+        sig = df[df['significant']]
+        print(f"  Carrier vs Non-carrier: {len(sig)} significant of {len(df)}")
+        if len(sig) > 0:
+            print(sig.to_string(index=False))
+    
+    # Per-gene within drug arm (report only p<0.05 raw for brevity)
+    print(f"  Per-gene significant (raw p<0.05):")
+    for col in carrier_cols:
+        gene = col.replace('carrier_','')
+        for meas in arm_data['measurement_label'].unique():
+            gc = arm_data[(arm_data[col]==1)&(arm_data['measurement_label']==meas)]['change']
+            gnc = arm_data[(arm_data[col]==0)&(arm_data['measurement_label']==meas)]['change']
+            if len(gc) >= 5 and len(gnc) >= 5:
+                try:
+                    _, pval = stats.mannwhitneyu(gc, gnc, alternative='two-sided')
+                    if pval < 0.05:
+                        print(f"    {gene}|{meas}: carrier_Δ={gc.median():.1f}(n={len(gc)}) vs "
+                              f"non={gnc.median():.1f}(n={len(gnc)}), p={pval:.4f}")
+                except: pass
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART F: SNAPPED ANALYSIS                                                      ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART F: Snapped analysis (all records, ≥1 datapoint per patient)")
+print("="*80)
+
+snapped = meas_raw.groupby(['person_id','measurement_label']).agg(
+    mean_value=('value_as_number','mean'),
+    n_records=('value_as_number','count')
+).reset_index()
+snapped = snapped.merge(cohort[[c for c in merge_cols if c in cohort.columns]],
+                        on='person_id', how='inner')
+print(f"Snapped: {len(snapped)} records, {snapped['person_id'].nunique()} patients")
+
+# Carrier vs non-carrier (on mean_value)
+print("\n--- Carrier vs Non-Carrier (snapped means) ---")
+snap_results = []
+for meas in snapped['measurement_label'].unique():
+    c = snapped[(snapped['has_any_variant']==1)&(snapped['measurement_label']==meas)]['mean_value']
+    nc = snapped[(snapped['has_any_variant']==0)&(snapped['measurement_label']==meas)]['mean_value']
+    r = mw_two(c, nc, 'Carrier', 'Non_carrier', meas)
+    if r: snap_results.append(r)
+if snap_results:
+    snap_df = fdr_correct(pd.DataFrame(snap_results))
+    print(snap_df.to_string(index=False))
+
+# Snapped by BMI × polymorphism
+print("\n--- Snapped: BMI × Polymorphism ---")
+snap_bmi_results = []
+for bmi_cat in ['Normal','Overweight','Obese']:
+    sub = snapped[snapped['bmi_cat']==bmi_cat]
+    for meas in sub['measurement_label'].unique():
+        c = sub[(sub['has_any_variant']==1)&(sub['measurement_label']==meas)]['mean_value']
+        nc = sub[(sub['has_any_variant']==0)&(sub['measurement_label']==meas)]['mean_value']
+        r = mw_two(c, nc, 'Carrier', 'Non_carrier', meas)
+        if r:
+            r['bmi_cat'] = bmi_cat
+            snap_bmi_results.append(r)
+if snap_bmi_results:
+    sbdf = fdr_correct(pd.DataFrame(snap_bmi_results))
+    sig_sb = sbdf[sbdf['significant']]
+    print(f"Significant BMI×Poly interactions: {len(sig_sb)}")
+    if len(sig_sb) > 0:
+        print(sig_sb.to_string(index=False))
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART G: POLYMORPHISM × BMI INTERACTION                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART G: Polymorphism × BMI interaction")
+print("="*80)
+
+bmi_valid = cohort[cohort['bmi'].notna()]
+if len(bmi_valid) > 0:
+    print("BMI distribution by carrier status:")
+    for g, label in [(0,'Non-carrier'),(1,'Carrier')]:
+        b = bmi_valid[bmi_valid['has_any_variant']==g]['bmi']
+        print(f"  {label}: n={len(b)}, mean={b.mean():.1f}, median={b.median():.1f}, SD={b.std():.1f}")
+    
+    cb = bmi_valid[bmi_valid['has_any_variant']==1]['bmi']
+    ncb = bmi_valid[bmi_valid['has_any_variant']==0]['bmi']
+    if len(cb) >= 5 and len(ncb) >= 5:
+        _, p = stats.mannwhitneyu(cb, ncb, alternative='two-sided')
+        print(f"  MWU p={p:.4f}")
+    
+    # Per gene
+    print("\nBMI by gene:")
+    bmi_gene_table = []
+    for col in carrier_cols:
+        gene = col.replace('carrier_','')
+        gc = bmi_valid[bmi_valid[col]==1]['bmi']
+        gnc = bmi_valid[bmi_valid[col]==0]['bmi']
+        if len(gc) >= 10 and len(gnc) >= 10:
+            _, p = stats.mannwhitneyu(gc, gnc, alternative='two-sided')
+            bmi_gene_table.append({
+                'gene': gene, 'n_carrier': len(gc),
+                'bmi_carrier': round(gc.median(),1),
+                'bmi_non_carrier': round(gnc.median(),1),
+                'p_raw': round(p,4)
+            })
+    if bmi_gene_table:
+        bgt = pd.DataFrame(bmi_gene_table)
+        print(bgt.to_string(index=False))
+    
+    # BMI category distribution by carrier status
+    print("\nBMI category × carrier status:")
+    ct = pd.crosstab(bmi_valid['bmi_cat'], bmi_valid['has_any_variant'], margins=True)
+    ct.columns = ['Non-carrier','Carrier','Total']
+    print(ct.to_string())
+    
+    try:
+        chi2, p_chi, dof, exp = stats.chi2_contingency(
+            pd.crosstab(bmi_valid['bmi_cat'], bmi_valid['has_any_variant']).values)
+        print(f"Chi-squared: chi2={chi2:.2f}, p={p_chi:.4f}")
+    except: pass
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART H: POLYMORPHISM × RACE INTERACTION                                       ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART H: Polymorphism × Race interaction")
+print("="*80)
+
+# Carrier rates by race
+print("Variant carrier rates by race:")
+race_carrier = cohort.groupby('race_cat').agg(
+    n_total=('person_id','count'),
+    n_carriers=('has_any_variant','sum')
+).reset_index()
+race_carrier['carrier_pct'] = (race_carrier['n_carriers']/race_carrier['n_total']*100).round(1)
+print(race_carrier.to_string(index=False))
+
+try:
+    ct_race = pd.crosstab(cohort['race_cat'], cohort['has_any_variant']).values
+    chi2, p_chi, _, _ = stats.chi2_contingency(ct_race)
+    print(f"Chi-squared for race × carrier: chi2={chi2:.2f}, p={p_chi:.4f}")
+except: pass
+
+# Per-gene carrier rates by race
+if carrier_cols:
+    print("\nPer-gene carrier rates by race:")
+    for col in carrier_cols:
+        gene = col.replace('carrier_','')
+        gc = cohort.groupby('race_cat')[col].agg(['sum','count']).reset_index()
+        gc['pct'] = (gc['sum']/gc['count']*100).round(1)
+        gc.columns = ['race','carriers','total','pct']
+        # Chi-squared
+        try:
+            ct = pd.crosstab(cohort['race_cat'], cohort[col]).values
+            chi2, p, _, _ = stats.chi2_contingency(ct)
+            print(f"  {gene}: p={p:.4f}")
+            for _, row in gc.iterrows():
+                if row['carriers'] > 0:
+                    print(f"    {row['race']}: {int(row['carriers'])}/{int(row['total'])} ({row['pct']}%)")
+        except:
+            pass
+
+# Drug response by race × polymorphism
+print("\n--- Drug response: Race × Polymorphism interaction ---")
+race_poly_results = []
+for race in ['White','Black','Hispanic']:
+    for drug_arm in ['Metformin','GLP1_RA']:
+        sub = paired[(paired['race_cat']==race)&(paired['treatment_arm']==drug_arm)].copy()
+        if sub['person_id'].nunique() < 10: continue
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        
+        for meas in sub['measurement_label'].unique():
+            c = sub[(sub['has_any_variant']==1)&(sub['measurement_label']==meas)]['change']
+            nc = sub[(sub['has_any_variant']==0)&(sub['measurement_label']==meas)]['change']
+            r = mw_two(c, nc, 'Carrier', 'Non_carrier', meas)
+            if r:
+                r['race'] = race
+                r['drug'] = drug_arm
+                race_poly_results.append(r)
+
+if race_poly_results:
+    rpdf = fdr_correct(pd.DataFrame(race_poly_results))
+    sig_rp = rpdf[rpdf['significant']]
+    print(f"Significant race×poly×drug interactions: {len(sig_rp)} of {len(rpdf)}")
+    if len(sig_rp) > 0:
+        print(sig_rp.to_string(index=False))
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART I: OR / RR ANALYSES                                                      ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART I: OR / RR for clinical outcomes by polymorphism")
+print("="*80)
+
+# For each measurement, define "improvement" as change in expected direction
+# HbA1c, Glucose, Triglycerides, LDL, Testosterone, CRP, ALT, AST → decrease = good
+# HDL, AMH → increase = good
+improve_direction = {
+    'Blood_Glucose': -1, 'HbA1c': -1, 'Triglycerides': -1, 'LDL': -1,
+    'Total_Cholesterol': -1, 'Testosterone': -1, 'Free_Testosterone': -1,
+    'CRP': -1, 'ALT': -1, 'AST': -1, 'Iron': 1, 'Ferritin': 1,
+    'HDL': 1, 'AMH': 1, 'Vitamin_D': 1, 'Folate': 1,
+}
+
+or_results = []
+for meas, direction in improve_direction.items():
+    sub = paired[paired['measurement_label']==meas].dropna(subset=['pre_value','post_value']).copy()
+    sub['change'] = sub['post_value'] - sub['pre_value']
+    sub['improved'] = (sub['change'] * direction > 0).astype(int)
+    
+    # Carrier vs non-carrier
+    carriers = sub[sub['has_any_variant']==1]
+    non_carriers = sub[sub['has_any_variant']==0]
+    
+    if len(carriers) < 10 or len(non_carriers) < 10:
+        continue
+    
+    a = carriers['improved'].sum()
+    b = len(carriers) - a
+    c = non_carriers['improved'].sum()
+    d = len(non_carriers) - c
+    
+    rate_c = a / (a+b) if (a+b) > 0 else 0
+    rate_nc = c / (c+d) if (c+d) > 0 else 0
+    rr = rate_c / rate_nc if rate_nc > 0 else np.nan
+    or_val = (a*d)/(b*c) if b > 0 and c > 0 else np.nan
+    
+    try:
+        _, p_fisher = stats.fisher_exact([[a,b],[c,d]])
+    except:
+        p_fisher = np.nan
+    
+    or_results.append({
+        'measurement': meas, 'direction': 'decrease' if direction == -1 else 'increase',
+        'n_carrier': a+b, 'n_non_carrier': c+d,
+        'improved_carrier': a, 'rate_carrier': round(rate_c,3),
+        'improved_non_carrier': c, 'rate_non_carrier': round(rate_nc,3),
+        'RR': round(rr,2) if not np.isnan(rr) else np.nan,
+        'OR': round(or_val,2) if not np.isnan(or_val) else np.nan,
+        'p_fisher': round(p_fisher,4) if not np.isnan(p_fisher) else np.nan
+    })
+
+if or_results:
+    or_df = pd.DataFrame(or_results)
+    print(or_df.to_string(index=False))
+
+# Also per drug arm × polymorphism
+print("\n--- OR/RR by drug arm × polymorphism ---")
+or_drug_results = []
+for drug_arm in ['Metformin','GLP1_RA','Combination']:
+    for meas, direction in improve_direction.items():
+        sub = paired[(paired['treatment_arm']==drug_arm)&(paired['measurement_label']==meas)].dropna(subset=['pre_value','post_value']).copy()
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        sub['improved'] = (sub['change'] * direction > 0).astype(int)
+        
+        carriers = sub[sub['has_any_variant']==1]
+        non_carriers = sub[sub['has_any_variant']==0]
+        if len(carriers) < 5 or len(non_carriers) < 5: continue
+        
+        a = carriers['improved'].sum()
+        b = len(carriers) - a
+        c = non_carriers['improved'].sum()
+        d = len(non_carriers) - c
+        
+        rate_c = a/(a+b) if (a+b)>0 else 0
+        rate_nc = c/(c+d) if (c+d)>0 else 0
+        rr = rate_c/rate_nc if rate_nc>0 else np.nan
+        or_v = (a*d)/(b*c) if b>0 and c>0 else np.nan
+        try: _, pf = stats.fisher_exact([[a,b],[c,d]])
+        except: pf = np.nan
+        
+        if pf < 0.1:  # Only report trending/significant
+            or_drug_results.append({
+                'drug': drug_arm, 'measurement': meas,
+                'n_carrier': a+b, 'n_non': c+d,
+                'rate_carrier': round(rate_c,3), 'rate_non': round(rate_nc,3),
+                'RR': round(rr,2) if not np.isnan(rr) else np.nan,
+                'OR': round(or_v,2) if not np.isnan(or_v) else np.nan,
+                'p_fisher': round(pf,4)
+            })
+if or_drug_results:
+    print(pd.DataFrame(or_drug_results).to_string(index=False))
+else:
+    print("  No trending results (all p>0.1)")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART J: EXPORT ALL TABLES                                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n"+"="*80)
+print("PART J: Exporting polymorphism results")
+print("="*80)
+
+export = {}
+
+# Gene-level between-group results
+for gene, res in gene_results.items():
+    if len(res['between']) > 0:
+        export[f'poly_{gene}_between'] = res['between']
+
+# Between all genes
+if 'between_genes' in dir() and len(between_genes) > 0:
+    export['poly_all_genes_kruskal'] = between_genes
+if 'pw_df' in dir() and len(pw_df) > 0:
+    export['poly_pairwise_genes'] = pw_df
+
+# Drug × poly
+for arm, df in drug_poly.items():
+    if len(df) > 0:
+        export[f'poly_drug_{arm}'] = df
+
+# Snapped
+if snap_results:
+    export['poly_snapped_carrier'] = snap_df
+if snap_bmi_results:
+    export['poly_snapped_bmi'] = sbdf
+
+# OR/RR
+if or_results:
+    export['poly_OR_RR_overall'] = or_df
+if or_drug_results:
+    export['poly_OR_RR_by_drug'] = pd.DataFrame(or_drug_results)
+
+# Race × poly
+if race_poly_results:
+    export['poly_race_interaction'] = rpdf
+
+# BMI × gene
+if 'bmi_gene_table' in dir() and bmi_gene_table:
+    export['poly_bmi_by_gene'] = pd.DataFrame(bmi_gene_table)
+
+for name, df in export.items():
+    df.to_csv(f'{name}.csv', index=False)
+    print(f"  Exported: {name}.csv ({len(df)} rows)")
+
+print("\n"+"="*80)
+print("POLYMORPHISM ANALYSIS COMPLETE")
+print("="*80)
+print(f"""
+Summary:
+  PCOS cohort: {len(cohort)} patients
+  Variant carriers: {cohort['has_any_variant'].sum()} ({cohort['has_any_variant'].mean()*100:.1f}%)
+  Genes analyzed: {len(carrier_cols)}
+  Paired measurements: {len(paired)} records
+  Snapped records: {len(snapped)} records
+  Tables exported: {len(export)}
+  
+Analyses completed:
+  A. Variant discovery (PCOS genes + GWAS SNPs)
+  B. Patient-variant mapping & group assignment
+  C. Per-gene: gene vs others vs no-variant
+  D. Between all gene groups (Kruskal-Wallis + pairwise)
+  E. Drug response × polymorphism
+  F. Snapped analysis (all values, BMI stratified)
+  G. Polymorphism × BMI interaction
+  H. Polymorphism × Race interaction
+  I. OR/RR for improvement by carrier status
+  J. All results exported to CSV
+""")
