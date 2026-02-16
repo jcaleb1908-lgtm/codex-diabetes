@@ -5,59 +5,313 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Codex Diabetes</title>
   <style>
+    @import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@400;600;700;800&display=swap");
+
     :root {
-      --bg: #f8fbf7;
-      --card: #ffffff;
-      --text: #1f2a1f;
-      --accent: #1f7a3a;
-      --border: #dbe7db;
+      --bg-1: #f1f5e9;
+      --bg-2: #fffaf0;
+      --surface: #ffffffcc;
+      --ink: #1a2022;
+      --muted: #5f6a6e;
+      --accent: #0f766e;
+      --accent-soft: #d7efec;
+      --line: #c9d9d5;
+      --shadow: 0 14px 42px rgba(17, 35, 32, 0.12);
     }
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: linear-gradient(180deg, #eef7ef 0%, var(--bg) 100%);
-      color: var(--text);
+      font-family: "Manrope", "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(920px 460px at 8% -2%, #cde8df 0%, transparent 65%),
+        radial-gradient(640px 360px at 100% 0%, #fce5b8 0%, transparent 56%),
+        linear-gradient(180deg, var(--bg-1), var(--bg-2));
     }
-    .wrap {
-      max-width: 860px;
-      margin: 64px auto;
-      padding: 0 20px;
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 18px 70px;
     }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
+
+    .hero {
+      backdrop-filter: blur(6px);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
       padding: 28px;
-      box-shadow: 0 8px 30px rgba(31, 42, 31, 0.06);
+      animation: rise 560ms ease both;
     }
-    h1 { margin: 0 0 10px; font-size: 2rem; }
-    p { line-height: 1.6; margin: 0 0 14px; }
+
     .badge {
       display: inline-block;
-      font-size: 0.8rem;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      color: var(--accent);
-      background: #e9f5ec;
-      border: 1px solid #cde5d1;
+      margin-bottom: 12px;
+      border: 1px solid #9ac8c2;
       border-radius: 999px;
-      padding: 6px 10px;
-      margin-bottom: 14px;
+      padding: 5px 11px;
+      background: var(--accent-soft);
+      font-size: 0.73rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--accent);
     }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+
+    h1 {
+      margin: 0;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: clamp(1.9rem, 5vw, 2.9rem);
+      line-height: 1.1;
+    }
+
+    .subtitle {
+      margin: 14px 0 0;
+      max-width: 70ch;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 1.01rem;
+    }
+
+    .hero-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 11px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      border: 1px solid #b6cbc7;
+      background: #ffffff;
+      padding: 8px 13px;
+      color: #163a36;
+      font-weight: 700;
+      text-decoration: none;
+      font-size: 0.86rem;
+    }
+
+    .pill:hover {
+      border-color: #88b8b1;
+      transform: translateY(-1px);
+    }
+
+    .stats {
+      margin-top: 18px;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #ffffffc7;
+      padding: 12px 14px;
+      animation: rise 560ms ease both;
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 1.26rem;
+      font-weight: 800;
+      color: #10302d;
+    }
+
+    .stat span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.83rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .grid {
+      margin-top: 20px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .card {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: #ffffffe6;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      animation: rise 560ms ease both;
+    }
+
+    .card h2 {
+      margin: 0 0 7px;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.35rem;
+    }
+
+    .card p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.94rem;
+    }
+
+    .file-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .file-list a {
+      display: block;
+      padding: 10px 11px;
+      border: 1px solid #d8e4e1;
+      border-radius: 10px;
+      color: #113532;
+      background: #ffffff;
+      text-decoration: none;
+      font-size: 0.92rem;
+    }
+
+    .file-list a:hover {
+      border-color: #86b9b2;
+      background: #f2fbfa;
+    }
+
+    .file-list code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+      color: #466360;
+    }
+
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      text-align: center;
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .card:nth-child(1) { animation-delay: 40ms; }
+    .card:nth-child(2) { animation-delay: 120ms; }
+    .card:nth-child(3) { animation-delay: 200ms; }
+    .card:nth-child(4) { animation-delay: 280ms; }
+
+    @media (max-width: 920px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .hero {
+        padding: 22px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <section class="card">
-      <span class="badge">GitHub Pages</span>
-      <h1>Codex Diabetes</h1>
-      <p>This project page hosts diabetes analysis outputs and supporting artifacts.</p>
-      <p>Repository owner: <strong>jcaleb1908-lgtm</strong></p>
-      <p>Site configured from the <code>main</code> branch root.</p>
+  <main class="page">
+    <section class="hero">
+      <span class="badge">Project Page</span>
+      <h1>Codex Diabetes Analysis Hub</h1>
+      <p class="subtitle">
+        Centralized access to model outputs, diagnostics, sensitivity checks, and reference artifacts from the diabetes analysis workflow.
+      </p>
+      <div class="hero-links">
+        <a class="pill" href="https://github.com/jcaleb1908-lgtm/codex-diabetes" target="_blank" rel="noreferrer">Repository</a>
+        <a class="pill" href="MASTER%20CODE%20ADVANCED%20ANALYSIS.txt">Master analysis notes</a>
+        <a class="pill" href="part3_validity_performance_report.txt">Performance report</a>
+      </div>
+      <div class="stats">
+        <div class="stat"><strong>26</strong><span>Total files</span></div>
+        <div class="stat"><strong>17</strong><span>CSV outputs</span></div>
+        <div class="stat"><strong>4</strong><span>Text reports</span></div>
+        <div class="stat"><strong>2</strong><span>Python scripts</span></div>
+      </div>
     </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Core Reports</h2>
+        <p>High-level summaries and rationale documents.</p>
+        <ul class="file-list">
+          <li><a href="MASTER%20CODE%20ADVANCED%20ANALYSIS.txt">MASTER CODE ADVANCED ANALYSIS <code>.txt</code></a></li>
+          <li><a href="part3_validity_performance_report.txt">part3_validity_performance_report <code>.txt</code></a></li>
+          <li><a href="bias_validity_report.txt">bias_validity_report <code>.txt</code></a></li>
+          <li><a href="bootstrap_wilcoxon_rationale.txt">bootstrap_wilcoxon_rationale <code>.txt</code></a></li>
+          <li><a href="performance_notes.csv">performance_notes <code>.csv</code></a></li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>Model & Outcome Tables</h2>
+        <p>Adjusted analyses, subgroup outputs, and risk factor tables.</p>
+        <ul class="file-list">
+          <li><a href="ancova_adjusted_results.csv">ancova_adjusted_results <code>.csv</code></a></li>
+          <li><a href="logistic_adjusted_results.csv">logistic_adjusted_results <code>.csv</code></a></li>
+          <li><a href="subgroup_model_results.csv">subgroup_model_results <code>.csv</code></a></li>
+          <li><a href="inertia_subgroup_results.csv">inertia_subgroup_results <code>.csv</code></a></li>
+          <li><a href="fdr_results.csv">fdr_results <code>.csv</code></a></li>
+          <li><a href="ascvd_risk_factor_status.csv">ascvd_risk_factor_status <code>.csv</code></a></li>
+          <li><a href="confounding_balance_table.csv">confounding_balance_table <code>.csv</code></a></li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>Diagnostics & Sensitivity</h2>
+        <p>Bias checks, missingness, immortal time, and measurement frequency diagnostics.</p>
+        <ul class="file-list">
+          <li><a href="immortal_time_diagnostics.csv">immortal_time_diagnostics <code>.csv</code></a></li>
+          <li><a href="immortal_time_group_summary.csv">immortal_time_group_summary <code>.csv</code></a></li>
+          <li><a href="missingness_rates_by_group.csv">missingness_rates_by_group <code>.csv</code></a></li>
+          <li><a href="missingness_model_results.csv">missingness_model_results <code>.csv</code></a></li>
+          <li><a href="hba1c_frequency_diagnostics.csv">hba1c_frequency_diagnostics <code>.csv</code></a></li>
+          <li><a href="hba1c_frequency_mitigation_results.csv">hba1c_frequency_mitigation_results <code>.csv</code></a></li>
+          <li><a href="left_censoring_sensitivity.csv">left_censoring_sensitivity <code>.csv</code></a></li>
+          <li><a href="nonparametric_sensitivity_results.csv">nonparametric_sensitivity_results <code>.csv</code></a></li>
+          <li><a href="confounding_sample_size_diagnostics.csv">confounding_sample_size_diagnostics <code>.csv</code></a></li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>Code & Run Artifacts</h2>
+        <p>Scripts, mock runs, and notebook export used to support the analysis process.</p>
+        <ul class="file-list">
+          <li><a href="concept_sets.py">concept_sets <code>.py</code></a></li>
+          <li><a href="_mock_run_mastes.py">_mock_run_mastes <code>.py</code></a></li>
+          <li><a href="_mock_run_output.log">_mock_run_output <code>.log</code></a></li>
+          <li><a href="jupyter%20dm%20code">jupyter dm code <code>artifact</code></a></li>
+        </ul>
+      </article>
+    </section>
+
+    <p class="footer">
+      Published via GitHub Pages from <code>main</code> branch root for <code>jcaleb1908-lgtm/codex-diabetes</code>.
+    </p>
   </main>
 </body>
 </html>
