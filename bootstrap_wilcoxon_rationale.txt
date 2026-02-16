@@ -1,0 +1,10 @@
+==========================================================================================
+BOOTSTRAP & WILCOXON RATIONALE
+==========================================================================================
+Primary inference strategy updated:
+- Use adjusted ANCOVA/logistic models with robust standard errors as primary inference.
+- Use propensity-weighted models for confounding-by-indication adjustment.
+- Retain nonparametric testing only as sensitivity checks for key outcomes (HbA1c, LDL).
+Rationale:
+- Bootstrap/Wilcoxon are useful for robustness but computationally heavy and do not adjust confounding.
+- Adjusted regression provides effect estimates with covariate control and interpretable CIs.

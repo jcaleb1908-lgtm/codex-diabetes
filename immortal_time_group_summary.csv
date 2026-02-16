@@ -1,0 +1,8 @@
+original_group,n_patients,mean_immortal_time_days,median_immortal_time_days,pct_with_immortal_time
+GLP1_mono,36,0.0,0.0,0.0
+Metformin_GLP1,36,114.63888888888889,107.5,100.0
+Metformin_mono,36,0.0,0.0,0.0
+Statin_GLP1,36,114.80555555555556,109.5,100.0
+Statin_GLP1_Metformin,36,177.80555555555554,169.5,100.0
+Statin_Metformin,36,104.27777777777777,106.0,100.0
+Statin_mono,36,0.0,0.0,0.0

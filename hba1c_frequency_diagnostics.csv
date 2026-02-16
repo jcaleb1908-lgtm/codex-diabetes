@@ -1,0 +1,8 @@
+group,n_patients,median_pre_count,median_post_count,median_total_count,pre_availability_rate,post_availability_rate,pre_post_availability_rate
+GLP1_mono,36,1.0,4.0,5.0,100.0,100.0,100.0
+Metformin_GLP1,36,1.0,4.0,5.0,100.0,100.0,100.0
+Metformin_mono,36,1.0,2.0,3.0,100.0,100.0,100.0
+Statin_GLP1,36,1.0,4.0,5.0,100.0,100.0,100.0
+Statin_GLP1_Metformin,36,1.0,4.0,5.0,100.0,100.0,100.0
+Statin_Metformin,36,1.0,1.5,2.5,100.0,100.0,100.0
+Statin_mono,36,1.0,2.0,3.0,100.0,100.0,100.0

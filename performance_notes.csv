@@ -1,0 +1,7 @@
+component,seconds,note
+Covariate cache build,0.010149000000000186,Vectorized groupby/pivot cache replaces repeated per-patient extraction loops in inferential modules.
+Propensity + balance diagnostics,0.056737750000000364,Computed IPTW and SMDs with vectorized matrix operations and cached covariate design.
+Adjusted model fitting,0.12435270799999998,Primary inference switched to adjusted ANCOVA/logistic with robust SE; weighted models use IPTW.
+Missingness diagnostics,0.009721124999999997,Vectorized missing-indicator creation and grouped logistic models across outcomes.
+ASCVD risk factor and subgroup analyses,0.02678975000000028,Added Hispanic vs non-Hispanic and White vs Black vs All_Other subgroup structure.
+Total Part 3 runtime,0.24675224999999967,End-to-end time for confounding/modeling/FDR/missingness/ASCVD modules.

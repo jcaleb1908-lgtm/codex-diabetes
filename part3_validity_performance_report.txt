@@ -1,0 +1,22 @@
+==========================================================================================
+PART 3 REPORT: VALIDITY + EFFICIENCY + ASCVD RF
+==========================================================================================
+A) Confounding by indication:
+- Propensity IPTW with balance diagnostics saved to /Users/jcbn/Desktop/CODEX/confounding_balance_table.csv
+- Sample size / effective N diagnostics saved to /Users/jcbn/Desktop/CODEX/confounding_sample_size_diagnostics.csv
+B) Regression/ANCOVA:
+- Continuous ANCOVA results saved to /Users/jcbn/Desktop/CODEX/ancova_adjusted_results.csv
+- Binary logistic results saved to /Users/jcbn/Desktop/CODEX/logistic_adjusted_results.csv
+C) Multiple testing:
+- BH-FDR outputs (raw p, q, q<0.05) saved to /Users/jcbn/Desktop/CODEX/fdr_results.csv
+D) Missingness mechanism:
+- Missingness rates saved to /Users/jcbn/Desktop/CODEX/missingness_rates_by_group.csv
+- Missingness models saved to /Users/jcbn/Desktop/CODEX/missingness_model_results.csv
+E) ASCVD risk-factor emphasis and subgroup structure:
+- RF status tables saved to /Users/jcbn/Desktop/CODEX/ascvd_risk_factor_status.csv
+- Subgroup model outputs saved to /Users/jcbn/Desktop/CODEX/subgroup_model_results.csv
+- Inertia subgroup outputs saved to /Users/jcbn/Desktop/CODEX/inertia_subgroup_results.csv
+F) Efficiency and sensitivity:
+- Performance notes saved to /Users/jcbn/Desktop/CODEX/performance_notes.csv
+- Bootstrap/Wilcoxon rationale saved to /Users/jcbn/Desktop/CODEX/bootstrap_wilcoxon_rationale.txt
+- Nonparametric sensitivity results saved to /Users/jcbn/Desktop/CODEX/nonparametric_sensitivity_results.csv

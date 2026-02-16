@@ -1,0 +1,4 @@
+family,outcome,model,n,estimate,ci_low,ci_high,p_value_raw
+binary_logistic,hba1c_control_post,IPTW_Logistic_HC3,248,6.062376102356435,0.0,inf,0.99999999983261
+binary_logistic,ldl_control_post,IPTW_Logistic_HC3,252,0.9118816307273546,0.05337983458989268,15.577569972751975,0.9492049359054925
+binary_logistic,hyperlipidemia_resolved_post,IPTW_Logistic_HC3,250,1.0353920677063104,0.0,inf,0.9999999991725652

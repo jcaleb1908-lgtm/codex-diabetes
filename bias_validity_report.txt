@@ -1,0 +1,24 @@
+==========================================================================================
+BIAS & VALIDITY REPORT
+==========================================================================================
+
+A) Immortal Time Bias
+- Assessment: Detected (combination-group IT>0 rate: 100.0%).
+- Fix implemented: Landmark time-zero alignment at 90 days from first observed exposure.
+- Impact: 105 of 252 patients changed exposure group after alignment.
+- Diagnostics exported: /Users/jcbn/Desktop/CODEX/immortal_time_diagnostics.csv
+
+B) Left Censoring / Triple Therapy Misclassification
+- Assessment: evaluated observable lookback before first observed exposure.
+- Triple-therapy reclassification at 365-day lookback: 100.0% potentially left-censored.
+- Sensitivity implemented with alternative lookback windows: 90, 180, 365, 730 days.
+- Diagnostics exported: /Users/jcbn/Desktop/CODEX/left_censoring_sensitivity.csv
+
+C) HbA1c Frequency / Measurement Bias
+- Assessment: median total HbA1c count varied by 2.5 across groups.
+- Mitigation implemented: inverse-intensity weighting and restricted comparable-intensity analysis.
+- Reported results include unweighted and mitigated estimates.
+- Diagnostics exported: /Users/jcbn/Desktop/CODEX/hba1c_frequency_diagnostics.csv
+- Mitigation results exported: /Users/jcbn/Desktop/CODEX/hba1c_frequency_mitigation_results.csv
+
+Bias checks complete.

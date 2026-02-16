@@ -1,0 +1,3 @@
+stage,n_total,n_glp1,n_no_glp1,effective_n_glp1,effective_n_no_glp1
+Initial cohort,252,144,108,,
+Propensity model sample,252,144,108,144.0,108.0
