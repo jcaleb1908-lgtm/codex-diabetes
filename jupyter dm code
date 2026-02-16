@@ -409,7 +409,11 @@ LIPID_RESPONSE_LDL_TARGET = 100      # LDL < 100 mg/dL post-treatment
 LIPID_RESPONSE_LDL_CHANGE = -20      # OR LDL decrease >= 20 mg/dL
 
 AGE_RANGE = (40, 65)
-MIN_REPORT_N = 20  # AoU reporting minimum: suppress any table row with n < 20
+MIN_SUPPRESSED_N = 20  # AoU reporting minimum: suppress any table row with n <= 20
+MIN_REPORT_N = MIN_SUPPRESSED_N + 1
+MIN_ANALYSIS_N_SMALL = MIN_REPORT_N
+MIN_ANALYSIS_N_STANDARD = MIN_REPORT_N
+output_dir = os.getcwd()
 
 # ============================================================================
 # CONCEPT SET INVENTORY TABLE
@@ -533,13 +537,6 @@ def get_concept_set_inventory():
             'n_concepts': len(HYPERTENSION_CONDITIONS['concept_ids']),
             'concept_ids': str(HYPERTENSION_CONDITIONS['concept_ids']),
             'used_in': 'Condition query (comorbidity identification)',
-        },
-        {
-            'name': SMOKING_SURVEY_QUESTIONS['name'],
-            'domain': SMOKING_SURVEY_QUESTIONS['domain'],
-            'n_concepts': len(SMOKING_SURVEY_QUESTIONS['concept_ids']),
-            'concept_ids': str(SMOKING_SURVEY_QUESTIONS['concept_ids']),
-            'used_in': 'Smoking status derivation (survey SQL, binary covariate)',
         },
         {
             'name': NEW_COHORT_MEASUREMENT_CONCEPTS['name'],
@@ -952,7 +949,6 @@ print("\n" + "-"*80)
 print("SECTION 2B: SMOKING VARIABLE REMOVED")
 print("-"*80)
 print("Smoking derivation/covariate usage removed per user request.")
-smoking_df = pd.DataFrame(columns=['person_id', 'smoking_status'])
 
 # -----------------------------------------------------------------------------
 # IDENTIFY DRUG USERS: Statins, Metformin, and GLP-1
@@ -1194,7 +1190,10 @@ def filter_table_by_min_n(df, table_name, n_col='n', min_n=MIN_REPORT_N):
     keep_mask = df[n_col].fillna(0) >= min_n
     excluded_n = int((~keep_mask).sum())
     if excluded_n > 0:
-        print(f"NOTE [{table_name}]: excluded {excluded_n} row(s) with {n_col} < {min_n} per AoU policy.")
+        print(
+            f"NOTE [{table_name}]: excluded {excluded_n} row(s) with "
+            f"{n_col} <= {MIN_SUPPRESSED_N} per AoU policy."
+        )
     return df.loc[keep_mask].copy()
 
 def filter_table_by_two_min_n(df, table_name, n_col_a, n_col_b, min_n=MIN_REPORT_N):
@@ -1205,7 +1204,7 @@ def filter_table_by_two_min_n(df, table_name, n_col_a, n_col_b, min_n=MIN_REPORT
     if excluded_n > 0:
         print(
             f"NOTE [{table_name}]: excluded {excluded_n} row(s) with "
-            f"{n_col_a} < {min_n} or {n_col_b} < {min_n} per AoU policy."
+            f"{n_col_a} <= {MIN_SUPPRESSED_N} or {n_col_b} <= {MIN_SUPPRESSED_N} per AoU policy."
         )
     return df.loc[keep_mask].copy()
 
@@ -1214,6 +1213,7 @@ def print_table_for_copy(title, df):
     print("\n" + "="*100)
     print(title)
     print("="*100)
+    print(f"Table description: rows with n <= {MIN_SUPPRESSED_N} were skipped per AoU reporting policy.")
     if df is None or len(df) == 0:
         print("No rows available after filtering.")
     else:
@@ -1378,7 +1378,7 @@ group_counts_df = filter_table_by_min_n(
     n_col='n_patients',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("Patients per Group with Complete Pre/Post Data (n >= 20)", group_counts_df)
+print_table_for_copy("Patients per Group with Complete Pre/Post Data (n > 20)", group_counts_df)
 
 # ============================================================================
 # SECTION 4B: GROUP QA TABLES (SMOKING REMOVED)
@@ -1411,7 +1411,264 @@ bmi_group_df = filter_table_by_min_n(
     n_col='n_patients',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("BMI Missingness by Exposure Group (n >= 20)", bmi_group_df)
+print_table_for_copy("BMI Missingness by Exposure Group (n > 20)", bmi_group_df)
+
+# ============================================================================
+# SECTION 4C: ANALYSIS GLOSSARY (EXECUTION MAP)
+# ============================================================================
+
+analysis_glossary_df = pd.DataFrame([
+    {'order': 1, 'analysis': 'Simple medication effects', 'scope': 'Cohort -> Sex -> Race', 'primary_control': 'Domain-specific', 'output_file': 'simple_medication_effects_cohort_sex_race.csv'},
+    {'order': 2, 'analysis': 'RR/OR medication effects', 'scope': 'Cohort -> Sex -> Race responders', 'primary_control': 'Metformin_mono for glycemic; Statin_mono for lipid', 'output_file': 'rr_or_medication_effects.csv'},
+    {'order': 3, 'analysis': 'Sequencing / intensification patterns', 'scope': 'Combination therapy cohorts', 'primary_control': 'Within-pattern comparisons', 'output_file': 'In-script tables'},
+    {'order': 4, 'analysis': 'Time-to-glycemic control', 'scope': 'Cohort + sex strata', 'primary_control': 'Metformin_mono reference (log-rank)', 'output_file': 'In-script tables'},
+    {'order': 5, 'analysis': 'Treatment heterogeneity (clusters)', 'scope': 'Phenotype clusters', 'primary_control': 'Group contrasts within cluster', 'output_file': 'In-script tables'},
+    {'order': 6, 'analysis': 'Discordant responders (medication-adjusted)', 'scope': 'HbA1c/LDL dual-domain responders', 'primary_control': 'Medication-background adjusted', 'output_file': 'discordant_medication_background_summary.csv + discordant_by_treatment_group.csv'},
+    {'order': 7, 'analysis': 'GLP-1 effect in statin-naive population', 'scope': 'Lipid outcomes', 'primary_control': 'Metformin_mono and statin-based comparisons', 'output_file': 'In-script tables'},
+    {'order': 8, 'analysis': 'Therapeutic inertia', 'scope': 'Intensification timing + demographics', 'primary_control': 'Demographic contrasts', 'output_file': 'inertia_subgroup_results.csv'},
+    {'order': 9, 'analysis': 'Bias checks and validity diagnostics', 'scope': 'Immortal time / left censoring / measurement frequency', 'primary_control': 'Sensitivity scenarios', 'output_file': 'bias_validity_report.txt + diagnostics CSVs'},
+    {'order': 10, 'analysis': 'Adjusted inferential models', 'scope': 'IPTW + ANCOVA/logistic + FDR + subgroup effects', 'primary_control': 'GLP1 exposure contrast', 'output_file': 'part3_validity_performance_report.txt + model CSVs'},
+]).sort_values('order')
+
+analysis_glossary_path = os.path.join(output_dir, 'analysis_glossary.csv')
+analysis_glossary_df.to_csv(analysis_glossary_path, index=False)
+print_table_for_copy("Analysis Glossary (Simple to Complex)", analysis_glossary_df)
+print(f"Saved: {analysis_glossary_path}")
+
+# ============================================================================
+# SECTION 5: SIMPLE MEDICATION EFFECTS (COHORT -> SEX -> RACE)
+# ============================================================================
+
+print("\n" + "="*100)
+print("SECTION 5: SIMPLE MEDICATION EFFECTS (COHORT -> SEX -> RACE)")
+print("="*100)
+print("Order of reporting: 1) Cohort, 2) Sex (Male/Female), 3) Race (White/Black/All_Other)")
+
+simple_effect_df = pre_post_complete[
+    ['person_id', 'group', 'measurement_category', 'change', 'sex_at_birth', 'race']
+].copy()
+simple_effect_df['glp1_exposure'] = simple_effect_df['group'].astype(str).str.contains('GLP1', case=False, na=False).astype(int)
+race_str = simple_effect_df['race'].astype(str)
+simple_effect_df['race3'] = np.select(
+    [
+        race_str.str.contains('White', case=False, na=False),
+        race_str.str.contains('Black|African', case=False, na=False),
+    ],
+    ['White', 'Black'],
+    default='All_Other'
+)
+
+simple_effect_rows = []
+strata_plan = [
+    ('cohort', 'All_Cohort'),
+    ('sex_at_birth', 'Male'),
+    ('sex_at_birth', 'Female'),
+    ('race3', 'White'),
+    ('race3', 'Black'),
+    ('race3', 'All_Other'),
+]
+
+for outcome in ALL_OUTCOMES:
+    outcome_df = simple_effect_df[simple_effect_df['measurement_category'] == outcome].copy()
+    for stratum_type, stratum_value in strata_plan:
+        if stratum_type == 'cohort':
+            d = outcome_df.copy()
+        else:
+            d = outcome_df[outcome_df[stratum_type] == stratum_value].copy()
+
+        glp1_vals = d[d['glp1_exposure'] == 1]['change'].dropna().values
+        no_glp1_vals = d[d['glp1_exposure'] == 0]['change'].dropna().values
+        if len(glp1_vals) < MIN_ANALYSIS_N_STANDARD or len(no_glp1_vals) < MIN_ANALYSIS_N_STANDARD:
+            continue
+
+        try:
+            _, p_val = stats.mannwhitneyu(glp1_vals, no_glp1_vals, alternative='two-sided')
+        except (ValueError, TypeError, ZeroDivisionError, FloatingPointError, KeyError, IndexError) as exc:
+            p_val = np.nan
+        ci_low, ci_high = bootstrap_difference_ci(glp1_vals, no_glp1_vals)
+
+        simple_effect_rows.append({
+            'outcome': outcome,
+            'stratum_type': stratum_type,
+            'stratum': stratum_value,
+            'n_glp1': len(glp1_vals),
+            'n_no_glp1': len(no_glp1_vals),
+            'delta_median_glp1_minus_no_glp1': np.median(glp1_vals) - np.median(no_glp1_vals),
+            'ci_low': ci_low,
+            'ci_high': ci_high,
+            'p_value_raw': p_val,
+        })
+
+simple_medication_effects_df = pd.DataFrame(simple_effect_rows)
+simple_medication_effects_df = filter_table_by_two_min_n(
+    simple_medication_effects_df,
+    table_name='Simple medication effects (cohort/sex/race)',
+    n_col_a='n_glp1',
+    n_col_b='n_no_glp1',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Simple Medication Effects by Cohort, Sex, and Race (n > 20 per arm)", simple_medication_effects_df)
+
+simple_effects_path = os.path.join(output_dir, 'simple_medication_effects_cohort_sex_race.csv')
+simple_medication_effects_df.to_csv(simple_effects_path, index=False)
+print(f"Saved: {simple_effects_path}")
+
+# ============================================================================
+# SECTION 6: RR/OR MEDICATION EFFECTS (DOMAIN-SPECIFIC CONTROLS)
+# ============================================================================
+
+print("\n" + "="*100)
+print("SECTION 6: RR/OR MEDICATION EFFECTS (DOMAIN-SPECIFIC CONTROLS)")
+print("="*100)
+print("Control rule applied:")
+print("  - Glycemic outcomes: Metformin_mono as control")
+print("  - Lipid outcomes: Statin_mono as control")
+
+def _rr_or_from_2x2(a, b, c, d):
+    """
+    a = exposed event, b = exposed non-event, c = control event, d = control non-event
+    Returns RR/OR with Wald-style 95% CI (Haldane-Anscombe correction if any zero cell).
+    """
+    a0, b0, c0, d0 = float(a), float(b), float(c), float(d)
+    if min(a0, b0, c0, d0) == 0:
+        a0 += 0.5
+        b0 += 0.5
+        c0 += 0.5
+        d0 += 0.5
+
+    risk_e = a0 / (a0 + b0)
+    risk_c = c0 / (c0 + d0)
+    rr = risk_e / risk_c if risk_c > 0 else np.nan
+    rr_se = np.sqrt((1 / a0) - (1 / (a0 + b0)) + (1 / c0) - (1 / (c0 + d0)))
+    rr_ci_low = np.exp(np.log(rr) - 1.96 * rr_se) if rr > 0 else np.nan
+    rr_ci_high = np.exp(np.log(rr) + 1.96 * rr_se) if rr > 0 else np.nan
+
+    odds_e = a0 / b0
+    odds_c = c0 / d0
+    or_val = odds_e / odds_c if odds_c > 0 else np.nan
+    or_se = np.sqrt((1 / a0) + (1 / b0) + (1 / c0) + (1 / d0))
+    or_ci_low = np.exp(np.log(or_val) - 1.96 * or_se) if or_val > 0 else np.nan
+    or_ci_high = np.exp(np.log(or_val) + 1.96 * or_se) if or_val > 0 else np.nan
+    return rr, rr_ci_low, rr_ci_high, or_val, or_ci_low, or_ci_high
+
+# Response endpoints by domain
+hba1c_rr = pre_post_complete[
+    pre_post_complete['measurement_category'] == 'HbA1c'
+][['person_id', 'group', 'change', 'sex_at_birth', 'race']].copy()
+hba1c_rr['responder'] = hba1c_rr['change'] <= GLYCEMIC_RESPONSE_THRESHOLD
+hba1c_rr['domain'] = 'Glycemic'
+hba1c_rr['control_group'] = 'Metformin_mono'
+hba1c_rr['endpoint'] = f"HbA1c change <= {GLYCEMIC_RESPONSE_THRESHOLD}"
+
+ldl_rr = pre_post_complete[
+    pre_post_complete['measurement_category'] == 'LDL'
+][['person_id', 'group', 'post', 'change', 'sex_at_birth', 'race']].copy()
+ldl_rr['responder'] = (ldl_rr['post'] < LIPID_RESPONSE_LDL_TARGET) | (ldl_rr['change'] <= LIPID_RESPONSE_LDL_CHANGE)
+ldl_rr['domain'] = 'Lipid'
+ldl_rr['control_group'] = 'Statin_mono'
+ldl_rr['endpoint'] = f"LDL post < {LIPID_RESPONSE_LDL_TARGET} or LDL change <= {LIPID_RESPONSE_LDL_CHANGE}"
+
+rr_or_base = pd.concat([
+    hba1c_rr[['person_id', 'group', 'responder', 'domain', 'control_group', 'endpoint', 'sex_at_birth', 'race']],
+    ldl_rr[['person_id', 'group', 'responder', 'domain', 'control_group', 'endpoint', 'sex_at_birth', 'race']],
+], ignore_index=True)
+
+rr_or_base_race = rr_or_base['race'].astype(str)
+rr_or_base['race3'] = np.select(
+    [
+        rr_or_base_race.str.contains('White', case=False, na=False),
+        rr_or_base_race.str.contains('Black|African', case=False, na=False),
+    ],
+    ['White', 'Black'],
+    default='All_Other'
+)
+
+rr_or_strata_plan = [
+    ('cohort', 'All_Cohort'),
+    ('sex_at_birth', 'Male'),
+    ('sex_at_birth', 'Female'),
+    ('race3', 'White'),
+    ('race3', 'Black'),
+    ('race3', 'All_Other'),
+]
+
+rr_or_rows = []
+for (domain, endpoint, control_group), d_domain in rr_or_base.groupby(['domain', 'endpoint', 'control_group']):
+    for stratum_type, stratum_value in rr_or_strata_plan:
+        if stratum_type == 'cohort':
+            d_stratum = d_domain.copy()
+        else:
+            d_stratum = d_domain[d_domain[stratum_type] == stratum_value].copy()
+
+        control = d_stratum[d_stratum['group'] == control_group]
+        n_control = len(control)
+        events_control = int(control['responder'].sum())
+        non_events_control = n_control - events_control
+        if n_control < MIN_ANALYSIS_N_STANDARD:
+            continue
+
+        for group in GROUPS:
+            if group == control_group:
+                continue
+            exposed = d_stratum[d_stratum['group'] == group]
+            n_exposed = len(exposed)
+            if n_exposed < MIN_ANALYSIS_N_STANDARD:
+                continue
+            events_exposed = int(exposed['responder'].sum())
+            non_events_exposed = n_exposed - events_exposed
+            try:
+                _, p_val = stats.fisher_exact(
+                    [[events_exposed, non_events_exposed], [events_control, non_events_control]],
+                    alternative='two-sided'
+                )
+            except (ValueError, TypeError, ZeroDivisionError, FloatingPointError, KeyError, IndexError) as exc:
+                p_val = np.nan
+
+            rr, rr_lo, rr_hi, or_val, or_lo, or_hi = _rr_or_from_2x2(
+                events_exposed, non_events_exposed, events_control, non_events_control
+            )
+            rr_or_rows.append({
+                'domain': domain,
+                'endpoint': endpoint,
+                'stratum_type': stratum_type,
+                'stratum': stratum_value,
+                'control_group': control_group,
+                'comparison_group': group,
+                'n_control': n_control,
+                'n_comparison': n_exposed,
+                'response_rate_control': events_control / n_control if n_control > 0 else np.nan,
+                'response_rate_comparison': events_exposed / n_exposed if n_exposed > 0 else np.nan,
+                'rr': rr,
+                'rr_ci_low': rr_lo,
+                'rr_ci_high': rr_hi,
+                'or': or_val,
+                'or_ci_low': or_lo,
+                'or_ci_high': or_hi,
+                'p_value_raw': p_val,
+            })
+
+rr_or_results_df = pd.DataFrame(rr_or_rows)
+rr_or_results_df = filter_table_by_two_min_n(
+    rr_or_results_df,
+    table_name='RR/OR medication effects',
+    n_col_a='n_control',
+    n_col_b='n_comparison',
+    min_n=MIN_REPORT_N
+)
+if len(rr_or_results_df) > 0:
+    rr_or_stratum_type_order = {'cohort': 0, 'sex_at_birth': 1, 'race3': 2}
+    rr_or_stratum_order = {'All_Cohort': 0, 'Male': 1, 'Female': 2, 'White': 3, 'Black': 4, 'All_Other': 5}
+    rr_or_results_df['_stratum_type_order'] = rr_or_results_df['stratum_type'].map(rr_or_stratum_type_order).fillna(99)
+    rr_or_results_df['_stratum_order'] = rr_or_results_df['stratum'].map(rr_or_stratum_order).fillna(99)
+    rr_or_results_df = rr_or_results_df.sort_values(
+        ['_stratum_type_order', '_stratum_order', 'domain', 'comparison_group']
+    ).drop(columns=['_stratum_type_order', '_stratum_order'])
+
+print_table_for_copy("RR/OR Medication Effects with Domain-Specific Controls (n > 20 per arm)", rr_or_results_df)
+
+rr_or_path = os.path.join(output_dir, 'rr_or_medication_effects.csv')
+rr_or_results_df.to_csv(rr_or_path, index=False)
+print(f"Saved: {rr_or_path}")
 
 # ============================================================================
 # ============================================================================
@@ -1496,7 +1753,7 @@ if len(sequencing_met_glp1_df) > 0:
     print(f"\n  Time to Intensification (days) by Sequence:")
     for seq in ['Metformin_First', 'GLP1_First']:
         seq_data = sequencing_met_glp1_df[sequencing_met_glp1_df['sequence'] == seq]['time_to_intensification_days']
-        if len(seq_data) >= MIN_REPORT_N:
+        if len(seq_data) >= MIN_ANALYSIS_N_SMALL:
             print(f"    {seq:<20}: Median = {seq_data.median():.0f}, IQR = [{seq_data.quantile(0.25):.0f}, {seq_data.quantile(0.75):.0f}]")
 
 # For Triple Therapy patients: determine sequencing pattern
@@ -1610,13 +1867,13 @@ if len(sequencing_met_glp1_df) > 0:
     for outcome in ALL_OUTCOMES:
         outcome_data = met_glp1_outcomes[met_glp1_outcomes['measurement_category'] == outcome]
 
-        if len(outcome_data) < MIN_REPORT_N:
+        if len(outcome_data) < MIN_ANALYSIS_N_STANDARD:
             continue
 
         for sequence in ['Metformin_First', 'GLP1_First', 'Concurrent']:
             seq_data = outcome_data[outcome_data['sequence'] == sequence]
 
-            if len(seq_data) >= MIN_REPORT_N:
+            if len(seq_data) >= MIN_ANALYSIS_N_SMALL:
                 pre_vals = seq_data['pre'].dropna().values
                 post_vals = seq_data['post'].dropna().values
                 change_vals = seq_data['change'].dropna().values
@@ -1659,7 +1916,7 @@ if len(sequencing_met_glp1_df) > 0:
         met_first = outcome_data[outcome_data['sequence'] == 'Metformin_First']['change'].dropna().values
         glp1_first = outcome_data[outcome_data['sequence'] == 'GLP1_First']['change'].dropna().values
 
-        if len(met_first) >= MIN_REPORT_N and len(glp1_first) >= MIN_REPORT_N:
+        if len(met_first) >= MIN_ANALYSIS_N_SMALL and len(glp1_first) >= MIN_ANALYSIS_N_SMALL:
             try:
                 _, p = stats.mannwhitneyu(met_first, glp1_first, alternative='two-sided')
                 diff = np.median(met_first) - np.median(glp1_first)
@@ -1700,13 +1957,13 @@ if len(sequencing_triple_df) > 0:
     for outcome in ALL_OUTCOMES:
         outcome_data = triple_outcomes[triple_outcomes['measurement_category'] == outcome]
 
-        if len(outcome_data) < MIN_REPORT_N:
+        if len(outcome_data) < MIN_ANALYSIS_N_STANDARD:
             continue
 
         for pattern in ['Early_Triple', 'Stepwise_Escalation']:
             pattern_data = outcome_data[outcome_data['pattern'] == pattern]
 
-            if len(pattern_data) >= MIN_REPORT_N:
+            if len(pattern_data) >= MIN_ANALYSIS_N_SMALL:
                 pre_vals = pattern_data['pre'].dropna().values
                 post_vals = pattern_data['post'].dropna().values
                 change_vals = pattern_data['change'].dropna().values
@@ -1746,14 +2003,14 @@ if len(sequencing_triple_df) > 0:
     for outcome in ALL_OUTCOMES:
         outcome_data = triple_outcomes[triple_outcomes['measurement_category'] == outcome]
 
-        if len(outcome_data) < MIN_REPORT_N:
+        if len(outcome_data) < MIN_ANALYSIS_N_STANDARD:
             continue
 
         for concordant in [True, False]:
             conc_data = outcome_data[outcome_data['guideline_concordant'] == concordant]
             conc_label = "Yes" if concordant else "No"
 
-            if len(conc_data) >= MIN_REPORT_N:
+            if len(conc_data) >= MIN_ANALYSIS_N_SMALL:
                 pre_vals = conc_data['pre'].dropna().values
                 post_vals = conc_data['post'].dropna().values
                 change_vals = conc_data['change'].dropna().values
@@ -1922,7 +2179,7 @@ print("-"*75)
 for group in GROUPS:
     group_data = time_to_control_df[time_to_control_df['group'] == group]
     n = len(group_data)
-    if n >= MIN_REPORT_N:
+    if n >= MIN_ANALYSIS_N_SMALL:
         events = group_data['event'].sum()
         event_rate = events / n * 100
         median_time = group_data[group_data['event'] == 1]['time_to_event_months'].median() if events > 0 else np.nan
@@ -1959,7 +2216,7 @@ if LIFELINES_AVAILABLE:
     for group in GROUPS:
         group_data = time_to_control_df[time_to_control_df['group'] == group]
 
-        if len(group_data) >= MIN_REPORT_N:
+        if len(group_data) >= MIN_ANALYSIS_N_STANDARD:
             T = group_data['time_to_event_months'].values
             E = group_data['event'].values
 
@@ -2003,11 +2260,11 @@ if LIFELINES_AVAILABLE:
     print("-"*70)
 
     ref_data = time_to_control_df[time_to_control_df['group'] == 'Metformin_mono']
-    if len(ref_data) >= MIN_REPORT_N:
+    if len(ref_data) >= MIN_ANALYSIS_N_STANDARD:
         for group in GROUPS:
             if group != 'Metformin_mono':
                 group_data = time_to_control_df[time_to_control_df['group'] == group]
-                if len(group_data) >= MIN_REPORT_N:
+                if len(group_data) >= MIN_ANALYSIS_N_STANDARD:
                     try:
                         result = logrank_test(
                             ref_data['time_to_event_months'],
@@ -2030,7 +2287,7 @@ else:
     for group in GROUPS:
         group_data = time_to_control_df[time_to_control_df['group'] == group]
 
-        if len(group_data) >= MIN_REPORT_N:
+        if len(group_data) >= MIN_ANALYSIS_N_STANDARD:
             events = group_data['event'].sum()
             event_rate = events / len(group_data) * 100
             event_times = group_data[group_data['event'] == 1]['time_to_event_months']
@@ -2156,7 +2413,7 @@ for group in GROUPS:
     for sex in ['Male', 'Female']:
         sex_data = group_data[group_data['sex_at_birth'] == sex]
 
-        if len(sex_data) >= MIN_REPORT_N:
+        if len(sex_data) >= MIN_ANALYSIS_N_SMALL:
             events = sex_data['event'].sum()
             event_rate = events / len(sex_data) * 100
             event_times = sex_data[sex_data['event'] == 1]['time_to_event_months']
@@ -2347,11 +2604,19 @@ if SKLEARN_AVAILABLE:
         cluster_data_complete['cluster'] = kmeans.fit_predict(X_scaled)
 
         print(f"\nK-Means clustering with k={n_clusters} clusters")
-        print(f"\nCluster Distribution:")
+        cluster_dist_rows = []
         for cluster in range(n_clusters):
             n = (cluster_data_complete['cluster'] == cluster).sum()
             pct = n / len(cluster_data_complete) * 100
-            print(f"  Cluster {cluster}: {n:>6} ({pct:>5.1f}%)")
+            cluster_dist_rows.append({'cluster': cluster, 'n': n, 'pct': pct})
+        cluster_distribution_df = pd.DataFrame(cluster_dist_rows)
+        cluster_distribution_df = filter_table_by_min_n(
+            cluster_distribution_df,
+            table_name='Cluster distribution',
+            n_col='n',
+            min_n=MIN_REPORT_N
+        )
+        print_table_for_copy("Cluster Distribution (n > 20)", cluster_distribution_df)
 
         # Characterize clusters
         print(f"\nCluster Characteristics (Median values):")
@@ -2429,7 +2694,7 @@ if SKLEARN_AVAILABLE:
             for group in GROUPS:
                 group_data = cluster_hba1c[cluster_hba1c['group'] == group]
 
-                if len(group_data) >= MIN_REPORT_N:
+                if len(group_data) >= MIN_ANALYSIS_N_SMALL:
                     pre_vals = group_data['pre'].dropna().values
                     post_vals = group_data['post'].dropna().values
                     change_vals = group_data['change'].dropna().values
@@ -2510,7 +2775,7 @@ if SKLEARN_AVAILABLE:
                     (cluster_outcomes['measurement_category'] == 'HbA1c')
                 ]['change'].dropna().values
 
-                if len(g1_data) >= MIN_REPORT_N and len(g2_data) >= MIN_REPORT_N:
+                if len(g1_data) >= MIN_ANALYSIS_N_SMALL and len(g2_data) >= MIN_ANALYSIS_N_SMALL:
                     try:
                         _, p = stats.mannwhitneyu(g1_data, g2_data, alternative='two-sided')
                         diff = np.median(g1_data) - np.median(g2_data)
@@ -2605,6 +2870,18 @@ ldl_response['lipid_responder'] = (ldl_response['ldl_post'] < LIPID_RESPONSE_LDL
 
 # Merge to get patients with both HbA1c and LDL data
 discordant_data = hba1c_response.merge(ldl_response, on='person_id', how='inner')
+discordant_data['has_statin'] = discordant_data['group'].astype(str).str.contains('Statin', case=False, na=False)
+discordant_data['has_metformin'] = discordant_data['group'].astype(str).str.contains('Metformin', case=False, na=False)
+discordant_data['has_glp1'] = discordant_data['group'].astype(str).str.contains('GLP1', case=False, na=False)
+discordant_data['medication_background'] = np.select(
+    [
+        discordant_data['has_statin'] & discordant_data['has_metformin'],
+        discordant_data['has_statin'] & (~discordant_data['has_metformin']),
+        (~discordant_data['has_statin']) & discordant_data['has_metformin'],
+    ],
+    ['Statin+Metformin', 'Statin_without_Metformin', 'Metformin_without_Statin'],
+    default='No_Statin_No_Metformin'
+)
 
 # Create response categories
 def categorize_response(row):
@@ -2627,11 +2904,46 @@ print(f"{'Category':<20} {'N':>8} {'%':>8}")
 print("-"*40)
 
 response_counts = discordant_data['response_category'].value_counts()
+response_category_rows = []
 for category in ['Dual_Responder', 'Glycemic_Only', 'Lipid_Only', 'Non_Responder']:
-    if category in response_counts.index:
-        n = response_counts[category]
-        pct = n / len(discordant_data) * 100
-        print(f"{category:<20} {n:>8} {pct:>7.1f}%")
+    n = int(response_counts.get(category, 0))
+    pct = n / len(discordant_data) * 100 if len(discordant_data) > 0 else 0
+    response_category_rows.append({'category': category, 'n': n, 'pct': pct})
+response_category_df = pd.DataFrame(response_category_rows)
+response_category_df = filter_table_by_min_n(
+    response_category_df,
+    table_name='Discordant response category distribution',
+    n_col='n',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Discordant Response Category Distribution (n > 20)", response_category_df)
+
+# Medication-background sensitivity to reduce pharmacotherapy confounding
+discordant_med_bg_rows = []
+for bg, d_bg in discordant_data.groupby('medication_background'):
+    n_bg = len(d_bg)
+    for category in ['Dual_Responder', 'Glycemic_Only', 'Lipid_Only', 'Non_Responder']:
+        n_cat = int((d_bg['response_category'] == category).sum())
+        discordant_med_bg_rows.append({
+            'medication_background': bg,
+            'category': category,
+            'n_background': n_bg,
+            'n_category': n_cat,
+            'pct_within_background': n_cat / n_bg * 100 if n_bg > 0 else np.nan
+        })
+
+discordant_med_bg_df = pd.DataFrame(discordant_med_bg_rows)
+discordant_med_bg_df = filter_table_by_two_min_n(
+    discordant_med_bg_df,
+    table_name='Discordant medication-background summary',
+    n_col_a='n_background',
+    n_col_b='n_category',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Discordant Categories by Medication Background (n > 20)", discordant_med_bg_df)
+discordant_med_bg_path = os.path.join(output_dir, 'discordant_medication_background_summary.csv')
+discordant_med_bg_df.to_csv(discordant_med_bg_path, index=False)
+print(f"Saved: {discordant_med_bg_path}")
 
 # -----------------------------------------------------------------------------
 # 4B. Characteristics of Discordant Responders
@@ -2660,7 +2972,7 @@ response_characteristics = []
 for category in ['Dual_Responder', 'Glycemic_Only', 'Lipid_Only', 'Non_Responder']:
     cat_data = discordant_with_features[discordant_with_features['response_category'] == category]
 
-    if len(cat_data) >= MIN_REPORT_N:
+    if len(cat_data) >= MIN_ANALYSIS_N_SMALL:
         n = len(cat_data)
         age = cat_data['age_at_index'].median()
         female_pct = (cat_data['sex_at_birth'] == 'Female').sum() / n * 100
@@ -2685,6 +2997,18 @@ for category in ['Dual_Responder', 'Glycemic_Only', 'Lipid_Only', 'Non_Responder
             'baseline_bmi': bl_bmi
         })
 
+response_characteristics_df = pd.DataFrame(response_characteristics)
+response_characteristics_df = filter_table_by_min_n(
+    response_characteristics_df,
+    table_name='Discordant response characteristics',
+    n_col='n',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Discordant Response Characteristics (n > 20)", response_characteristics_df)
+response_characteristics_path = os.path.join(output_dir, 'discordant_response_characteristics.csv')
+response_characteristics_df.to_csv(response_characteristics_path, index=False)
+print(f"Saved: {response_characteristics_path}")
+
 # -----------------------------------------------------------------------------
 # 4C. Discordant Responders by Treatment Group
 # -----------------------------------------------------------------------------
@@ -2701,7 +3025,7 @@ discordant_by_group = []
 for group in GROUPS:
     group_data = discordant_data[discordant_data['group'] == group]
 
-    if len(group_data) >= MIN_REPORT_N:
+    if len(group_data) >= MIN_ANALYSIS_N_STANDARD:
         n = len(group_data)
         dual = (group_data['response_category'] == 'Dual_Responder').sum()
         glyc_only = (group_data['response_category'] == 'Glycemic_Only').sum()
@@ -2725,6 +3049,16 @@ for group in GROUPS:
         })
 
 discordant_by_group_df = pd.DataFrame(discordant_by_group)
+discordant_by_group_df = filter_table_by_min_n(
+    discordant_by_group_df,
+    table_name='Discordant responders by treatment group',
+    n_col='n',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Discordant Responders by Treatment Group (n > 20)", discordant_by_group_df)
+discordant_by_group_path = os.path.join(output_dir, 'discordant_by_treatment_group.csv')
+discordant_by_group_df.to_csv(discordant_by_group_path, index=False)
+print(f"Saved: {discordant_by_group_path}")
 
 # -----------------------------------------------------------------------------
 # 4D. Statistical Comparison of Discordant Groups
@@ -2738,7 +3072,7 @@ print("-"*80)
 glyc_only = discordant_with_features[discordant_with_features['response_category'] == 'Glycemic_Only']
 lipid_only = discordant_with_features[discordant_with_features['response_category'] == 'Lipid_Only']
 
-if len(glyc_only) >= MIN_REPORT_N and len(lipid_only) >= MIN_REPORT_N:
+if len(glyc_only) >= MIN_ANALYSIS_N_STANDARD and len(lipid_only) >= MIN_ANALYSIS_N_STANDARD:
     print(f"\nComparing Glycemic-Only vs Lipid-Only Responders:")
     print(f"  N Glycemic-Only: {len(glyc_only)}")
     print(f"  N Lipid-Only:    {len(lipid_only)}")
@@ -2810,6 +3144,7 @@ except ImportError:
 if STATSMODELS_AVAILABLE and len(discordant_with_features) >= 100:
     print("\nLogistic Regression: Predictors of Glycemic-Only Response (vs Dual Responder)")
     print("(Among responders to at least one domain)")
+    print("Medication-adjusted specification includes statin, metformin, and GLP-1 exposure indicators.")
 
     # Subset to responders only
     responders = discordant_with_features[
@@ -2829,15 +3164,19 @@ if STATSMODELS_AVAILABLE and len(discordant_with_features) >= 100:
         responders['bl_hba1c_std'] = (responders['hba1c_pre'] - responders['hba1c_pre'].mean()) / responders['hba1c_pre'].std()
         responders['bl_ldl_std'] = (responders['ldl_pre'] - responders['ldl_pre'].mean()) / responders['ldl_pre'].std()
 
-        # GLP-1 containing regimen
+        # Medication exposure indicators to reduce pharmacotherapy confounding
+        responders['has_statin'] = responders['group'].str.contains('Statin', case=False).astype(int)
+        responders['has_metformin'] = responders['group'].str.contains('Metformin', case=False).astype(int)
         responders['has_glp1'] = responders['group'].str.contains('GLP1', case=False).astype(int)
 
         model_data = responders[['discordant', 'age_std', 'female', 'race_black',
-                                  'bl_hba1c_std', 'bl_ldl_std', 'has_glp1']].dropna()
+                                  'bl_hba1c_std', 'bl_ldl_std',
+                                  'has_statin', 'has_metformin', 'has_glp1']].dropna()
 
         if len(model_data) >= 50:
             try:
-                X = model_data[['age_std', 'female', 'race_black', 'bl_hba1c_std', 'bl_ldl_std', 'has_glp1']]
+                X = model_data[['age_std', 'female', 'race_black', 'bl_hba1c_std', 'bl_ldl_std',
+                                'has_statin', 'has_metformin', 'has_glp1']]
                 X = sm.add_constant(X)
                 y = model_data['discordant']
 
@@ -2846,7 +3185,8 @@ if STATSMODELS_AVAILABLE and len(discordant_with_features) >= 100:
                 print(f"\n{'Variable':<25} {'OR':>8} {'95% CI':>18} {'p-value':>12}")
                 print("-"*70)
 
-                for var in ['age_std', 'female', 'race_black', 'bl_hba1c_std', 'bl_ldl_std', 'has_glp1']:
+                for var in ['age_std', 'female', 'race_black', 'bl_hba1c_std', 'bl_ldl_std',
+                            'has_statin', 'has_metformin', 'has_glp1']:
                     if var in model.params.index:
                         coef = model.params[var]
                         se = model.bse[var]
@@ -2889,12 +3229,15 @@ Clinical Implications:
 - Glycemic-only responders: Consider adding/intensifying statin therapy
 - Lipid-only responders: Consider GLP-1 addition or glycemic intensification
 - Characterization helps predict who will have discordant responses
+- Medication-background diagnostics were added to reduce confounding by
+  statin/metformin exposure when interpreting discordance
 
 Novel Contribution:
 - Challenges assumption that metabolic improvements occur uniformly
 - Real-world evidence for multi-dimensional treatment response
 - Supports individualized approach to cardiometabolic management
 - Identifies gaps between glycemic and lipid control in clinical practice
+- Adds pharmacotherapy-adjusted discordant profiling (statin/metformin/GLP-1)
 """)
 
 # ============================================================================
@@ -2944,16 +3287,26 @@ lipid_data['has_glp1'] = lipid_data['group'].str.contains('GLP1', case=False)
 print(f"\nLipid data available:")
 print(f"  Total patients: {lipid_data['person_id'].nunique()}")
 
-print(f"\n{'Group':<25} {'Statin Status':<15} {'Has GLP-1':>10} {'N (lipid data)':>15}")
-print("-"*70)
-
+lipid_group_rows = []
 for group in GROUPS:
     group_data = lipid_data[lipid_data['group'] == group]
     n = group_data['person_id'].nunique()
-    if n > 0:
-        statin_status = 'Naive' if group in statin_naive_groups else 'Exposed'
-        has_glp1 = 'Yes' if 'GLP1' in group else 'No'
-        print(f"{group:<25} {statin_status:<15} {has_glp1:>10} {n:>15}")
+    statin_status = 'Naive' if group in statin_naive_groups else 'Exposed'
+    has_glp1 = 'Yes' if 'GLP1' in group else 'No'
+    lipid_group_rows.append({
+        'group': group,
+        'statin_status': statin_status,
+        'has_glp1': has_glp1,
+        'n_lipid_data': n
+    })
+lipid_group_df = pd.DataFrame(lipid_group_rows)
+lipid_group_df = filter_table_by_min_n(
+    lipid_group_df,
+    table_name='Lipid data availability by group',
+    n_col='n_lipid_data',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Lipid Data Availability by Group (n > 20)", lipid_group_df)
 
 # -----------------------------------------------------------------------------
 # 5B. Lipid Outcomes in Statin-Naive GLP-1 Users
@@ -2983,7 +3336,7 @@ for outcome in ['LDL', 'HDL', 'Triglycerides', 'Total_Cholesterol']:
     ]
 
     for label, data in [('No GLP-1', outcome_met_only), ('With GLP-1', outcome_glp1_naive)]:
-        if len(data) >= MIN_REPORT_N:
+        if len(data) >= MIN_ANALYSIS_N_SMALL:
             pre_vals = data['pre'].dropna().values
             post_vals = data['post'].dropna().values
             change_vals = data['change'].dropna().values
@@ -3016,7 +3369,7 @@ for outcome in ['LDL', 'HDL', 'Triglycerides', 'Total_Cholesterol']:
             })
 
     # Compare GLP-1 vs No GLP-1 (statin-naive)
-    if len(outcome_met_only) >= MIN_REPORT_N and len(outcome_glp1_naive) >= MIN_REPORT_N:
+    if len(outcome_met_only) >= MIN_ANALYSIS_N_SMALL and len(outcome_glp1_naive) >= MIN_ANALYSIS_N_SMALL:
         try:
             _, p_between = stats.mannwhitneyu(
                 outcome_glp1_naive['change'].dropna(),
@@ -3066,7 +3419,7 @@ for outcome in ['LDL', 'HDL', 'Triglycerides', 'Total_Cholesterol']:
     ]
 
     for label, data in [('GLP-1, No Statin', glp1_no_statin), ('GLP-1 + Statin', glp1_with_statin)]:
-        if len(data) >= MIN_REPORT_N:
+        if len(data) >= MIN_ANALYSIS_N_SMALL:
             change_vals = data['change'].dropna().values
             change_stats = calculate_stats(change_vals)
 
@@ -3094,7 +3447,7 @@ for outcome in ['LDL', 'HDL', 'Triglycerides', 'Total_Cholesterol']:
             })
 
     # Compare statin-naive vs statin-exposed GLP-1 users
-    if len(glp1_no_statin) >= MIN_REPORT_N and len(glp1_with_statin) >= MIN_REPORT_N:
+    if len(glp1_no_statin) >= MIN_ANALYSIS_N_SMALL and len(glp1_with_statin) >= MIN_ANALYSIS_N_SMALL:
         try:
             _, p = stats.mannwhitneyu(
                 glp1_no_statin['change'].dropna(),
@@ -3151,7 +3504,7 @@ for outcome in ['LDL', 'Triglycerides']:
     ]
 
     for comp_name, group1, group2 in comparisons:
-        if len(group1) >= MIN_REPORT_N and len(group2) >= MIN_REPORT_N:
+        if len(group1) >= MIN_ANALYSIS_N_SMALL and len(group2) >= MIN_ANALYSIS_N_SMALL:
             try:
                 _, p = stats.mannwhitneyu(group1, group2, alternative='two-sided')
                 diff = np.median(group1) - np.median(group2)
@@ -3320,11 +3673,19 @@ patient_drug_history_df = patient_drug_history_df.merge(
 
 print(f"\nPatients with drug history data: {len(patient_drug_history_df)}")
 
-print(f"\nNumber of Drug Classes Used:")
+drug_class_rows = []
 for n_classes in [1, 2, 3]:
     n = (patient_drug_history_df['n_drug_classes'] == n_classes).sum()
     pct = n / len(patient_drug_history_df) * 100
-    print(f"  {n_classes} class{'es' if n_classes > 1 else '':>3}: {n:>6} ({pct:>5.1f}%)")
+    drug_class_rows.append({'n_drug_classes': n_classes, 'n': n, 'pct': pct})
+drug_class_distribution_df = pd.DataFrame(drug_class_rows)
+drug_class_distribution_df = filter_table_by_min_n(
+    drug_class_distribution_df,
+    table_name='Number of drug classes used',
+    n_col='n',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Number of Drug Classes Used (n > 20)", drug_class_distribution_df)
 
 # -----------------------------------------------------------------------------
 # 7B. Time to Intensification Analysis
@@ -3345,7 +3706,6 @@ print(f"  IQR:    [{intensified_patients['time_to_intensification_months'].quant
       f"{intensified_patients['time_to_intensification_months'].quantile(0.75):.1f}] months")
 
 # Distribution of time to intensification
-print(f"\nTime to Intensification Distribution:")
 bins = [0, 90, 180, 365, 730, float('inf')]
 labels = ['<3 mo', '3-6 mo', '6-12 mo', '1-2 yr', '>2 yr']
 
@@ -3356,10 +3716,19 @@ intensified_patients['intensification_bin'] = pd.cut(
     right=False
 )
 
+intensification_dist_rows = []
 for label in labels:
     n = (intensified_patients['intensification_bin'] == label).sum()
     pct = n / len(intensified_patients) * 100 if len(intensified_patients) > 0 else 0
-    print(f"  {label:<20}: {n:>6} ({pct:>5.1f}%)")
+    intensification_dist_rows.append({'time_bin': label, 'n': n, 'pct': pct})
+intensification_distribution_df = pd.DataFrame(intensification_dist_rows)
+intensification_distribution_df = filter_table_by_min_n(
+    intensification_distribution_df,
+    table_name='Time to intensification distribution',
+    n_col='n',
+    min_n=MIN_REPORT_N
+)
+print_table_for_copy("Time to Intensification Distribution (n > 20)", intensification_distribution_df)
 
 # -----------------------------------------------------------------------------
 # 7C. Therapeutic Inertia - HbA1c While on Suboptimal Therapy
@@ -3465,7 +3834,7 @@ if len(inertia_df) >= 50:
     print(f"\n  By Sex:")
     for sex in ['Male', 'Female']:
         sex_data = inertia_df[inertia_df['sex_at_birth'] == sex]
-        if len(sex_data) >= MIN_REPORT_N:
+        if len(sex_data) >= MIN_ANALYSIS_N_STANDARD:
             inertia_rate = sex_data['therapeutic_inertia'].mean() * 100
             avg_time = sex_data['time_on_monotherapy_months'].median()
             print(f"    {sex:<10}: Inertia rate = {inertia_rate:.1f}%, Median time on mono = {avg_time:.1f} mo (n={len(sex_data)})")
@@ -3474,7 +3843,7 @@ if len(inertia_df) >= 50:
     male_inertia = inertia_df[inertia_df['sex_at_birth'] == 'Male']['therapeutic_inertia']
     female_inertia = inertia_df[inertia_df['sex_at_birth'] == 'Female']['therapeutic_inertia']
 
-    if len(male_inertia) >= MIN_REPORT_N and len(female_inertia) >= MIN_REPORT_N:
+    if len(male_inertia) >= MIN_ANALYSIS_N_STANDARD and len(female_inertia) >= MIN_ANALYSIS_N_STANDARD:
         try:
             contingency = [[male_inertia.sum(), len(male_inertia) - male_inertia.sum()],
                            [female_inertia.sum(), len(female_inertia) - female_inertia.sum()]]
@@ -3489,7 +3858,7 @@ if len(inertia_df) >= 50:
     print(f"\n  By Race:")
     for race in ['White', 'Black or African American', 'Asian']:
         race_data = inertia_df[inertia_df['race'].astype(str).str.contains(race, case=False, na=False)]
-        if len(race_data) >= MIN_REPORT_N:
+        if len(race_data) >= MIN_ANALYSIS_N_STANDARD:
             inertia_rate = race_data['therapeutic_inertia'].mean() * 100
             avg_time = race_data['time_on_monotherapy_months'].median()
             race_label = race[:15] if len(race) > 15 else race
@@ -3499,7 +3868,7 @@ if len(inertia_df) >= 50:
     white_inertia = inertia_df[inertia_df['race'].astype(str).str.contains('White', case=False, na=False)]['therapeutic_inertia']
     black_inertia = inertia_df[inertia_df['race'].astype(str).str.contains('Black|African', case=False, na=False)]['therapeutic_inertia']
 
-    if len(white_inertia) >= MIN_REPORT_N and len(black_inertia) >= MIN_REPORT_N:
+    if len(white_inertia) >= MIN_ANALYSIS_N_STANDARD and len(black_inertia) >= MIN_ANALYSIS_N_STANDARD:
         try:
             contingency = [[black_inertia.sum(), len(black_inertia) - black_inertia.sum()],
                            [white_inertia.sum(), len(white_inertia) - white_inertia.sum()]]
@@ -3528,7 +3897,7 @@ if len(intensified_patients) >= 50:
 
     for sex in ['Male', 'Female']:
         sex_data = intensified_patients[intensified_patients['sex_at_birth'] == sex]['time_to_intensification_months']
-        if len(sex_data) >= MIN_REPORT_N:
+        if len(sex_data) >= MIN_ANALYSIS_N_STANDARD:
             median = sex_data.median()
             iqr_low = sex_data.quantile(0.25)
             iqr_high = sex_data.quantile(0.75)
@@ -3538,7 +3907,7 @@ if len(intensified_patients) >= 50:
     male_time = intensified_patients[intensified_patients['sex_at_birth'] == 'Male']['time_to_intensification_months'].dropna()
     female_time = intensified_patients[intensified_patients['sex_at_birth'] == 'Female']['time_to_intensification_months'].dropna()
 
-    if len(male_time) >= MIN_REPORT_N and len(female_time) >= MIN_REPORT_N:
+    if len(male_time) >= MIN_ANALYSIS_N_STANDARD and len(female_time) >= MIN_ANALYSIS_N_STANDARD:
         try:
             _, p = stats.mannwhitneyu(male_time, female_time, alternative='two-sided')
             p_str = f"{p:.4f}" if p >= 0.0001 else "<0.0001"
@@ -3557,7 +3926,7 @@ if len(intensified_patients) >= 50:
             intensified_patients['race'].astype(str).str.contains(race, case=False, na=False)
         ]['time_to_intensification_months'].dropna()
 
-        if len(race_data) >= MIN_REPORT_N:
+        if len(race_data) >= MIN_ANALYSIS_N_STANDARD:
             median = race_data.median()
             iqr_low = race_data.quantile(0.25)
             iqr_high = race_data.quantile(0.75)
@@ -3829,8 +4198,16 @@ immortal_time_diagnostics_df = person_timeline[[
 
 immortal_time_path = os.path.join(output_dir, 'immortal_time_diagnostics.csv')
 immortal_group_path = os.path.join(output_dir, 'immortal_time_group_summary.csv')
+immortal_group_summary = filter_table_by_min_n(
+    immortal_group_summary,
+    table_name='Immortal time group summary',
+    n_col='n_patients',
+    min_n=MIN_REPORT_N
+)
 immortal_time_diagnostics_df.to_csv(immortal_time_path, index=False)
 immortal_group_summary.to_csv(immortal_group_path, index=False)
+print_table_for_copy("Immortal Time Group Summary (n > 20)", immortal_group_summary)
+print_table_for_copy("Immortal Time Diagnostics (person-level)", immortal_time_diagnostics_df)
 
 # -----------------------------------------------------------------------------
 # B) Left censoring and triple-therapy sensitivity analyses
@@ -3895,6 +4272,18 @@ for w in lookback_windows:
 
 left_censoring_group_df = pd.DataFrame(left_censoring_group_rows)
 left_censoring_triple_df = pd.DataFrame(left_censoring_triple_rows)
+left_censoring_group_df = filter_table_by_min_n(
+    left_censoring_group_df,
+    table_name='Left censoring group retention',
+    n_col='n_original',
+    min_n=MIN_REPORT_N
+)
+left_censoring_triple_df = filter_table_by_min_n(
+    left_censoring_triple_df,
+    table_name='Left censoring triple sensitivity',
+    n_col='n_triple_original',
+    min_n=MIN_REPORT_N
+)
 left_censoring_sensitivity_df = pd.concat([
     left_censoring_group_df.assign(table_type='group_retention'),
     left_censoring_triple_df.assign(table_type='triple_sensitivity')
@@ -3902,6 +4291,7 @@ left_censoring_sensitivity_df = pd.concat([
 
 left_censoring_path = os.path.join(output_dir, 'left_censoring_sensitivity.csv')
 left_censoring_sensitivity_df.to_csv(left_censoring_path, index=False)
+print_table_for_copy("Left Censoring Sensitivity (n > 20)", left_censoring_sensitivity_df)
 
 # -----------------------------------------------------------------------------
 # C) HbA1c frequency/measurement bias and mitigation
@@ -3944,7 +4334,7 @@ hba1c_frequency_group_df = filter_table_by_min_n(
     n_col='n_patients',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("HbA1c Frequency Diagnostics (n >= 20)", hba1c_frequency_group_df)
+print_table_for_copy("HbA1c Frequency Diagnostics (n > 20)", hba1c_frequency_group_df)
 
 hba1c_change_analysis = pre_post_complete[
     pre_post_complete['measurement_category'] == 'HbA1c'
@@ -4014,7 +4404,7 @@ hba1c_mitigation_results_df = filter_table_by_min_n(
 
 print(f"\nMitigation strategy applied: inverse-intensity weighting + restricted comparable intensity "
       f"({overlap_low}-{overlap_high} HbA1c measures)")
-print_table_for_copy("HbA1c Mitigation Results (n >= 20)", hba1c_mitigation_results_df)
+print_table_for_copy("HbA1c Mitigation Results (n > 20)", hba1c_mitigation_results_df)
 
 hba1c_frequency_path = os.path.join(output_dir, 'hba1c_frequency_diagnostics.csv')
 hba1c_mitigation_path = os.path.join(output_dir, 'hba1c_frequency_mitigation_results.csv')
@@ -4618,7 +5008,7 @@ fdr_results_df = filter_table_by_min_n(
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("FDR Results (n >= 20)", fdr_results_df)
+print_table_for_copy("FDR Results (n > 20)", fdr_results_df)
 
 # -----------------------------------------------------------------------------
 # D) Missing-data mechanism checks
@@ -4715,7 +5105,7 @@ missing_model_results_df = filter_table_by_min_n(
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("Missingness Rates by Group (n >= 20)", missing_rates_by_group_df)
+print_table_for_copy("Missingness Rates by Group (n > 20)", missing_rates_by_group_df)
 
 perf_notes.append({
     'component': 'Missingness diagnostics',
@@ -4786,7 +5176,7 @@ ascvd_rf_summary_df = filter_table_by_min_n(
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("ASCVD Risk-Factor Status (n >= 20)", ascvd_rf_summary_df)
+print_table_for_copy("ASCVD Risk-Factor Status (n > 20)", ascvd_rf_summary_df)
 
 subgroup_model_rows = []
 for subgroup_col in ['hispanic_group', 'race3']:
@@ -4831,12 +5221,45 @@ subgroup_model_results_df = filter_table_by_min_n(
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("HbA1c Subgroup ANCOVA (n >= 20)", subgroup_model_results_df)
+print_table_for_copy("HbA1c Subgroup ANCOVA (n > 20)", subgroup_model_results_df)
 
-# Explicit drug-effectiveness stratification by race and sex
+# Explicit drug-effectiveness stratification in requested order:
+# 1) Cohort, 2) Sex, 3) Race
 effectiveness_rows = []
 for outcome in ALL_OUTCOMES:
     outcome_df = ancova_df[ancova_df['measurement_category'] == outcome].copy()
+
+    d_cohort = outcome_df.copy()
+    req = [
+        'post', 'pre', 'glp1_exposure', 'age_at_index', 'statin_exposure',
+        'metformin_exposure', 'pre_measure_count', 'pre_drug_exposure_count',
+        'baseline_hyperlipidemia', 'baseline_diabetes_uncontrolled',
+        'sex_at_birth', 'race3', 'hispanic_group', 'iptw_trimmed'
+    ]
+    req = [c for c in req if c in d_cohort.columns]
+    d_cohort = d_cohort.dropna(subset=req)
+    if len(d_cohort) >= MIN_ANALYSIS_N_STANDARD and d_cohort['glp1_exposure'].nunique() >= 2:
+        cohort_formula = (
+            "post ~ glp1_exposure + pre + age_at_index + statin_exposure + "
+            "metformin_exposure + pre_measure_count + pre_drug_exposure_count + "
+            "baseline_hyperlipidemia + baseline_diabetes_uncontrolled + "
+            "C(sex_at_birth) + C(race3) + C(hispanic_group)"
+        )
+        try:
+            fit_cohort = smf.wls(cohort_formula, data=d_cohort, weights=d_cohort['iptw_trimmed']).fit(cov_type='HC3')
+            est, lo, hi, p = safe_get(fit_cohort, 'glp1_exposure')
+            effectiveness_rows.append({
+                'stratum_type': 'cohort',
+                'stratum': 'All_Cohort',
+                'outcome': outcome,
+                'n': len(d_cohort),
+                'estimate': est,
+                'ci_low': lo,
+                'ci_high': hi,
+                'p_value_raw': p,
+            })
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            analysis_logger.warning("Cohort effectiveness model skipped (%s): %s", outcome, exc)
 
     for sex_value, d_sex in outcome_df.groupby('sex_at_birth'):
         req = [
@@ -4847,7 +5270,7 @@ for outcome in ALL_OUTCOMES:
         ]
         req = [c for c in req if c in d_sex.columns]
         d_sex = d_sex.dropna(subset=req)
-        if len(d_sex) < MIN_REPORT_N or d_sex['glp1_exposure'].nunique() < 2:
+        if len(d_sex) < MIN_ANALYSIS_N_STANDARD or d_sex['glp1_exposure'].nunique() < 2:
             continue
         sex_formula = (
             "post ~ glp1_exposure + pre + age_at_index + statin_exposure + "
@@ -4880,7 +5303,7 @@ for outcome in ALL_OUTCOMES:
         ]
         req = [c for c in req if c in d_race.columns]
         d_race = d_race.dropna(subset=req)
-        if len(d_race) < MIN_REPORT_N or d_race['glp1_exposure'].nunique() < 2:
+        if len(d_race) < MIN_ANALYSIS_N_STANDARD or d_race['glp1_exposure'].nunique() < 2:
             continue
         race_formula = (
             "post ~ glp1_exposure + pre + age_at_index + statin_exposure + "
@@ -4905,13 +5328,26 @@ for outcome in ALL_OUTCOMES:
             analysis_logger.warning("Race-stratified effectiveness model skipped (%s, %s): %s", outcome, race_value, exc)
 
 drug_effectiveness_by_demo_df = pd.DataFrame(effectiveness_rows)
+if len(drug_effectiveness_by_demo_df) > 0:
+    stratum_type_order = {'cohort': 0, 'sex_at_birth': 1, 'race3': 2}
+    stratum_order = {'All_Cohort': 0, 'Male': 1, 'Female': 2, 'White': 3, 'Black': 4, 'All_Other': 5}
+    drug_effectiveness_by_demo_df['_stratum_type_order'] = (
+        drug_effectiveness_by_demo_df['stratum_type'].map(stratum_type_order).fillna(99)
+    )
+    drug_effectiveness_by_demo_df['_stratum_order'] = (
+        drug_effectiveness_by_demo_df['stratum'].map(stratum_order).fillna(99)
+    )
+    drug_effectiveness_by_demo_df = drug_effectiveness_by_demo_df.sort_values(
+        ['_stratum_type_order', '_stratum_order', 'outcome']
+    ).drop(columns=['_stratum_type_order', '_stratum_order'])
+
 drug_effectiveness_by_demo_df = filter_table_by_min_n(
     drug_effectiveness_by_demo_df,
-    table_name='Drug effectiveness by race/sex',
+    table_name='Drug effectiveness by cohort/sex/race',
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("Drug Effectiveness by Race and Sex (n >= 20)", drug_effectiveness_by_demo_df)
+print_table_for_copy("Drug Effectiveness by Cohort, Sex, and Race (n > 20)", drug_effectiveness_by_demo_df)
 
 perf_notes.append({
     'component': 'ASCVD risk factor and subgroup analyses',
@@ -4991,7 +5427,7 @@ inertia_subgroup_results_df = filter_table_by_min_n(
     n_col='n',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("Inertia Subgroup Summary (n >= 20)", inertia_subgroup_results_df)
+print_table_for_copy("Inertia Subgroup Summary (n > 20)", inertia_subgroup_results_df)
 
 # -----------------------------------------------------------------------------
 # Bootstrap/Wilcoxon audit and sensitivity-only strategy
@@ -5007,7 +5443,7 @@ for outcome in ['HbA1c', 'LDL']:
     d = d.merge(model_cov_df[['person_id', 'glp1_exposure']], on='person_id', how='inner')
     treated = d[d['glp1_exposure'] == 1]['change'].dropna().values
     control = d[d['glp1_exposure'] == 0]['change'].dropna().values
-    if len(treated) < MIN_REPORT_N or len(control) < MIN_REPORT_N:
+    if len(treated) < MIN_ANALYSIS_N_STANDARD or len(control) < MIN_ANALYSIS_N_STANDARD:
         continue
     u_stat, p_val = stats.mannwhitneyu(treated, control, alternative='two-sided')
     nonparam_rows.append({
@@ -5035,7 +5471,7 @@ nonparam_sensitivity_df = filter_table_by_two_min_n(
     n_col_b='n_no_glp1',
     min_n=MIN_REPORT_N
 )
-print_table_for_copy("Nonparametric Sensitivity (n >= 20 in each arm)", nonparam_sensitivity_df)
+print_table_for_copy("Nonparametric Sensitivity (n > 20 in each arm)", nonparam_sensitivity_df)
 
 rationale_lines = [
     "="*90,
@@ -5106,6 +5542,12 @@ print_table_for_copy("Saved Table: inertia_subgroup_results.csv", inertia_subgro
 print_table_for_copy("Saved Table: drug_effectiveness_by_race_sex.csv", drug_effectiveness_by_demo_df)
 print_table_for_copy("Saved Table: nonparametric_sensitivity_results.csv", nonparam_sensitivity_df)
 print_table_for_copy("Saved Table: performance_notes.csv", performance_notes_df)
+print_table_for_copy("Saved Table: simple_medication_effects_cohort_sex_race.csv", simple_medication_effects_df)
+print_table_for_copy("Saved Table: analysis_glossary.csv", analysis_glossary_df)
+print_table_for_copy("Saved Table: rr_or_medication_effects.csv", rr_or_results_df)
+print_table_for_copy("Saved Table: discordant_medication_background_summary.csv", discordant_med_bg_df)
+print_table_for_copy("Saved Table: discordant_response_characteristics.csv", response_characteristics_df)
+print_table_for_copy("Saved Table: discordant_by_treatment_group.csv", discordant_by_group_df)
 
 with open(rationale_path, 'w') as f:
     f.write("\n".join(rationale_lines))
@@ -5118,7 +5560,7 @@ part3_report_lines = [
     "="*90,
     "PART 3 REPORT: VALIDITY + EFFICIENCY + ASCVD RF",
     "="*90,
-    f"Reporting rule: rows with n < {MIN_REPORT_N} were excluded per AoU minimum cell-size policy.",
+    f"Reporting rule: rows with n <= {MIN_SUPPRESSED_N} were excluded per AoU minimum cell-size policy.",
     "A) Confounding by indication:",
     f"- Propensity IPTW with balance diagnostics saved to {balance_path}",
     f"- Sample size / effective N diagnostics saved to {sample_size_path}",
@@ -5134,7 +5576,7 @@ part3_report_lines = [
     f"- RF status tables saved to {ascvd_path}",
     f"- Subgroup model outputs saved to {subgroup_path}",
     f"- Inertia subgroup outputs saved to {inertia_subgroup_path}",
-    f"- Drug effectiveness by race/sex saved to {effectiveness_demo_path}",
+    f"- Drug effectiveness by cohort/sex/race saved to {effectiveness_demo_path}",
     "F) Efficiency and sensitivity:",
     f"- Performance notes saved to {performance_path}",
     f"- Bootstrap/Wilcoxon rationale saved to {rationale_path}",
@@ -5152,10 +5594,17 @@ print(f"\nPart 3 report saved to: {part3_report_path}")
 # ============================================================================
 
 print("\n" + "="*100)
-print("ANALYSIS COMPLETE - NOVEL ANALYSES SUMMARY")
+print("ANALYSIS COMPLETE - SIMPLE TO COMPLEX SUMMARY")
 print("="*100)
 
 print("""
+This analysis is organized from simple medication effects to more complex models.
+Order used:
+1) Cohort-level effects
+2) Sex-stratified effects (Male/Female)
+3) Race-stratified effects (White/Black/All_Other)
+4) Complex/novel analyses and adjusted models
+
 This comprehensive analysis file includes 7 NOVEL RESEARCH ANALYSES
 plus PART 2 BIAS & COHORT VALIDITY checks and PART 3 validity/performance upgrades:
 
@@ -5165,6 +5614,20 @@ B) Standardized BMI extraction with validation checks
 C) Smoking variables/tables removed per user request
 D) Measurement timing rules (minimum pre/post gap enforcement)
    - Inflammatory biomarkers (CRP, ESR, Fibrinogen) excluded per protocol
+
+ANALYSIS GLOSSARY:
+- analysis_glossary.csv (printed at start)
+
+SECTION 5 (Simple to Complex Start):
+- Simple medication effects table in required order:
+  Cohort -> Sex -> Race
+- Output: simple_medication_effects_cohort_sex_race.csv
+
+SECTION 6 (Additional RR/OR Analysis):
+- RR and OR of response by domain-specific controls:
+  glycemic -> Metformin_mono control, lipid -> Statin_mono control
+- Reported in required order: Cohort -> Sex -> Race
+- Output: rr_or_medication_effects.csv
 
 PART 2 BIAS & VALIDITY DELIVERABLES:
 A) Immortal time bias diagnostics + landmark time-zero correction
@@ -5184,11 +5647,14 @@ D) Missingness mechanism models + rates by exposure group
 E) ASCVD risk-factor analyses and subgroup structure:
    - Hispanic vs Non-Hispanic
    - Race: White vs Black vs All_Other
-   - Drug effectiveness table by race and sex (adjusted)
+   - Drug effectiveness table by cohort/sex/race (adjusted)
 F) Performance notes + targeted nonparametric sensitivity only
 Reporting rule:
-- All table rows with n < 20 were excluded and noted
+- All table rows with n <= 20 were excluded and noted
 Saved outputs:
+- analysis_glossary.csv
+- simple_medication_effects_cohort_sex_race.csv
+- rr_or_medication_effects.csv
 - confounding_balance_table.csv
 - ancova_adjusted_results.csv
 - logistic_adjusted_results.csv
@@ -5196,6 +5662,9 @@ Saved outputs:
 - missingness_model_results.csv
 - ascvd_risk_factor_status.csv
 - drug_effectiveness_by_race_sex.csv
+- discordant_medication_background_summary.csv
+- discordant_response_characteristics.csv
+- discordant_by_treatment_group.csv
 - part3_validity_performance_report.txt
 
 1. TREATMENT SEQUENCING / INTENSIFICATION PATTERNS
@@ -5213,6 +5682,7 @@ Saved outputs:
 4. DISCORDANT RESPONDERS
    - Patients with glycemic but not lipid response (or vice versa)
    - Characterization of discordant response patterns
+   - Medication-background adjustment (statin/metformin/GLP-1 exposure)
 
 5. GLP-1 EFFECT IN STATIN-NAIVE POPULATION
    - Independent lipid effects of GLP-1 without statin confounding
