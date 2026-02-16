@@ -1,0 +1,1300 @@
+#!/usr/bin/env python3
+"""
+================================================================================
+PCOS GLP-1 RA vs METFORMIN ANALYSIS — MAIN CODE (Parts 1-9)
+All of Us Research Program | CDR: C2024Q3R8
+================================================================================
+VERIFIED CONCEPT IDS — All confirmed against CDR on 2026-02-14
+
+TABLE FORMATTING:
+  - Yellow highlight: p_adj < 0.05 (significant)
+  - Green highlight: n < 20 (underpowered, interpret with caution)
+  - No dark blue under black text
+
+ANALYSIS STRUCTURE:
+  Part 1:  Setup & Verified Concepts
+  Part 2:  PCOS Cohort Build
+  Part 3:  Treatment Arm Assignment (drugs via concept_ancestor)
+  Part 4:  Laboratory Measurements Pull
+  Part 5:  Covariates (BMI, DM2, Smoking, Obesity, Menstrual, Infertility)
+  Part 6:  Table 1 — Cohort Characteristics
+  Part 7:  Primary Analysis: Within-Group + Between-Group + Effect Sizes
+  Part 8:  Subgroup: BMI
+  Part 9:  Subgroup: Race
+  Part 10: Menstrual Conditions & Infertility — INCIDENCE + RESOLUTION design
+  Part 11: Confounder Analysis — DM2 as covariate
+  Part 12: Confounder Analysis — Smoking as covariate
+  Part 13: Export All Tables
+================================================================================
+"""
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 1: SETUP & VERIFIED CONCEPT DICTIONARY                                ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+from itertools import combinations
+import os, warnings
+warnings.filterwarnings('ignore')
+
+dataset = os.environ.get("WORKSPACE_CDR")
+print(f"CDR: {dataset}")
+
+# ════════════════════════════════════════════════════════════════
+# VERIFIED CONCEPT IDS (confirmed against C2024Q3R8)
+# ════════════════════════════════════════════════════════════════
+
+CONCEPTS = {
+    # ── PCOS Diagnosis ──
+    # 40443308: "Polycystic ovary syndrome" (5,000 pts)
+    # 36683296: "Polycystic ovary" (3,050 pts)
+    'PCOS': [40443308, 36683296],
+
+    # ── Drug Ingredients (use concept_ancestor for descendant lookup) ──
+    'METFORMIN':    [1503297],     # metformin ingredient, 47,327 pts via ancestor
+    'SEMAGLUTIDE':  [793143],      # semaglutide ingredient, 10,815 pts
+    'LIRAGLUTIDE':  [40170911],    # liraglutide ingredient, 6,302 pts
+    'DULAGLUTIDE':  [45774435],    # dulaglutide ingredient, 8,366 pts
+    'EXENATIDE':    [1583722],     # exenatide ingredient, 1,790 pts
+    'TIRZEPATIDE':  [779705],      # tirzepatide ingredient, 1,531 pts
+    'LIXISENATIDE': [44506754],    # lixisenatide ingredient, 103 pts
+    'ALBIGLUTIDE':  [44816332],    # albiglutide ingredient, 141 pts
+
+    # ── Measurements (LOINC, verified with record counts) ──
+    'Blood_Glucose': [3004501, 3000483],  # Glucose serum/plasma (280K) + blood (47K)
+    'HbA1c':         [3004410],           # HbA1c (151K pts, med=6.10)
+    'Triglycerides': [3022192],           # Triglyceride serum/plasma (197K, med=113)
+    'LDL':           [3028288, 3028437],  # LDL by calc (152K) + direct (62K)
+    'HDL':           [3007070],           # HDL (198K, med=50)
+    'Total_Chol':    [3027114],           # Total Cholesterol (203K, med=181)
+    'Non_HDL_Chol':  [3044491],           # Non-HDL Cholesterol (124K)
+    'FSH':           [4149280, 40484118], # FSH measurement (602 pts) + quantitative (375)
+    'LH':            [4287388],           # LH measurement (564 pts)
+    'Estradiol':     [3025285],           # Estradiol E2 serum/plasma (14K pts)
+    'Testosterone':  [3008893],           # Testosterone serum/plasma (26K pts)
+    'Free_Testo':    [3016049],           # Free Testosterone (14K pts)
+    'DHEA_S':        [3015884],           # DHEA-S (5,825 pts)
+    'Cortisol':      [3009682],           # Cortisol serum/plasma (14K pts)
+    'Iron':          [3002400],           # Iron serum/plasma (87K, med=67)
+    'Ferritin':      [3001122],           # Ferritin serum/plasma (88K, med=71)
+    'Iron_Sat':      [3000185],           # Iron saturation (74K)
+    'TIBC':          [3021044],           # TIBC (81K, med=329)
+    'Folate':        [3036987],           # Folate serum/plasma (62K, med=14.5)
+    'Vitamin_B12':   [3000593],           # Cobalamin/B12 (101K, med=511)
+    'Vitamin_D':     [3020149, 40765040], # 25-OH-D3 (81K) + D3+D2 (53K)
+    'Magnesium':     [3001420],           # Magnesium serum/plasma (123K, med=1.9)
+    'AMH':           [3047826],           # Anti-Mullerian hormone (2,242 pts)
+    'Insulin_Lab':   [3016244],           # Insulin serum/plasma (6,752 pts)
+    'CRP':           [3020460],           # CRP serum/plasma (69K)
+    'ALT':           [3006923],           # ALT serum/plasma (237K)
+    'AST':           [3013721],           # AST serum/plasma (258K)
+    'BMI':           [3038553, 4245997, 40762636], # BMI ratio(505K) + SNOMED(9K) + %ile(34K)
+    'TSH':           [3009201],           # Thyrotropin (143K)
+    'Hemoglobin':    [3000963],           # Hemoglobin (279K)
+    'Hematocrit':    [3023314],           # Hematocrit (258K)
+
+    # ── Conditions: DM2 ──
+    'DM2': [4193704, 201826, 443238],
+    # 4193704: T2DM w/o complication (72K)
+    # 201826: T2DM (31K)
+    # 443238: Diabetic poor control (10K)
+
+    # ── Conditions: Menstrual ──
+    'AMENORRHEA':       [443800],      # 12,558 pts
+    'OLIGOMENORRHEA':   [442274, 4142066, 4032474],  # 1,128 + 422 + 89
+    'DYSMENORRHEA':     [194696],      # 10,207 pts
+    'MENORRHAGIA':      [4302555],     # 3,506 pts
+    'ABNL_UTERINE_BLD': [45757810],    # 1,585 pts
+    'ABNL_MENSTRUAL':   [4171394],     # 5,937 pts (abnormal menstrual cycle)
+    'INTERMENSTRUAL':   [195012],      # 3,442 pts
+    'MENOMETRORRHAGIA': [4151132],     # 465 pts
+
+    # ── Conditions: Infertility ──
+    'FEMALE_INFERTILITY': [201909],    # 5,180 pts
+    'ANOVULATION':        [197044, 4144685],  # 1,302 + 34 pts
+
+    # ── Conditions: Smoking ──
+    'NICOTINE_DEP':  [4209423],       # 51,667 pts
+
+    # ── Conditions: Obesity ──
+    'OBESITY':       [433736],        # 98,518 pts
+    'MORBID_OBESITY': [434005],       # 49,111 pts
+
+    # ── Conditions: PCOS features ──
+    'HIRSUTISM':     [134718],        # 3,578 pts
+    'ACNE':          [141095],        # 16,914 pts
+    'ALOPECIA':      [133280],        # 7,596 pts
+    'INSULIN_RESIST': [35622016],     # 80 pts
+    'METABOLIC_SYND': [436940],       # 5,888 pts
+
+    # ── Smoking Survey ──
+    'SMOKE_Q':       [1333011],       # "Did you smoke tobacco..."
+    'SMOKE_A_NEVER': [1332923],       # "No, Never" (56,324 pts)
+    'SMOKE_A_PAST':  [1333137],       # "Not currently, but in the past" (14,258)
+    'SMOKE_A_DAILY': [1332910],       # "Yes, Every day" (3,304)
+    'SMOKE_A_SOME':  [1332939],       # "Yes, Some days" (1,978)
+}
+
+# Aggregate groups for convenience
+ALL_GLP1_INGREDIENTS = (
+    CONCEPTS['SEMAGLUTIDE'] + CONCEPTS['LIRAGLUTIDE'] + 
+    CONCEPTS['DULAGLUTIDE'] + CONCEPTS['EXENATIDE'] + 
+    CONCEPTS['TIRZEPATIDE'] + CONCEPTS['LIXISENATIDE'] + 
+    CONCEPTS['ALBIGLUTIDE']
+)
+
+ALL_MENSTRUAL_CONCEPTS = (
+    CONCEPTS['AMENORRHEA'] + CONCEPTS['OLIGOMENORRHEA'] + 
+    CONCEPTS['DYSMENORRHEA'] + CONCEPTS['MENORRHAGIA'] + 
+    CONCEPTS['ABNL_UTERINE_BLD'] + CONCEPTS['ABNL_MENSTRUAL'] + 
+    CONCEPTS['INTERMENSTRUAL'] + CONCEPTS['MENOMETRORRHAGIA']
+)
+
+ALL_INFERTILITY_CONCEPTS = (
+    CONCEPTS['FEMALE_INFERTILITY'] + CONCEPTS['ANOVULATION']
+)
+
+# Measurement labels for analysis
+MEASUREMENT_MAP = {
+    'Blood_Glucose': CONCEPTS['Blood_Glucose'],
+    'HbA1c': CONCEPTS['HbA1c'],
+    'Triglycerides': CONCEPTS['Triglycerides'],
+    'LDL': CONCEPTS['LDL'],
+    'HDL': CONCEPTS['HDL'],
+    'Total_Cholesterol': CONCEPTS['Total_Chol'],
+    'FSH': CONCEPTS['FSH'],
+    'LH': CONCEPTS['LH'],
+    'Estradiol': CONCEPTS['Estradiol'],
+    'Testosterone': CONCEPTS['Testosterone'],
+    'Free_Testosterone': CONCEPTS['Free_Testo'],
+    'DHEA_S': CONCEPTS['DHEA_S'],
+    'Cortisol': CONCEPTS['Cortisol'],
+    'Iron': CONCEPTS['Iron'],
+    'Ferritin': CONCEPTS['Ferritin'],
+    'TIBC': CONCEPTS['TIBC'],
+    'Folate': CONCEPTS['Folate'],
+    'Vitamin_B12': CONCEPTS['Vitamin_B12'],
+    'Vitamin_D': CONCEPTS['Vitamin_D'],
+    'Magnesium': CONCEPTS['Magnesium'],
+    'AMH': CONCEPTS['AMH'],
+    'Insulin': CONCEPTS['Insulin_Lab'],
+    'CRP': CONCEPTS['CRP'],
+    'ALT': CONCEPTS['ALT'],
+    'AST': CONCEPTS['AST'],
+    'TSH': CONCEPTS['TSH'],
+}
+
+# Time windows
+PRE_WINDOW_DAYS = 180     # 180 days before index
+POST_START_DAYS = 180     # post starts 180 days after index
+POST_END_DAYS = 730       # post ends 730 days (2 years) after index
+DRUG_START_DAYS = 0       # drug exposure window start (from index)
+DRUG_END_DAYS = 730       # drug exposure window end
+
+# Build ALL measurement concept IDs for a single query
+ALL_MEAS_IDS = []
+MEAS_ID_TO_LABEL = {}
+for label, ids in MEASUREMENT_MAP.items():
+    for cid in ids:
+        ALL_MEAS_IDS.append(cid)
+        MEAS_ID_TO_LABEL[cid] = label
+ALL_MEAS_IDS_STR = ','.join(str(i) for i in ALL_MEAS_IDS)
+
+print(f"Verified concepts loaded.")
+print(f"  GLP-1 RA ingredients: {len(ALL_GLP1_INGREDIENTS)}")
+print(f"  Measurement categories: {len(MEASUREMENT_MAP)}")
+print(f"  Total measurement concept IDs: {len(ALL_MEAS_IDS)}")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  STATISTICAL HELPER FUNCTIONS                                                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+def wilcoxon_within(group_df):
+    """Within-group Wilcoxon signed-rank test on paired pre/post."""
+    results = []
+    for meas in group_df['measurement_label'].unique():
+        sub = group_df[group_df['measurement_label'] == meas].dropna(subset=['pre_value', 'post_value'])
+        n = len(sub)
+        if n < 5:
+            continue
+        diff = sub['post_value'] - sub['pre_value']
+        if diff.std() == 0:
+            continue
+        try:
+            stat, pval = stats.wilcoxon(diff, alternative='two-sided')
+        except:
+            continue
+        med_pre = sub['pre_value'].median()
+        med_post = sub['post_value'].median()
+        med_change = diff.median()
+        pct_change = (med_change / med_pre * 100) if med_pre != 0 else np.nan
+        # Effect size: r = Z / sqrt(N)
+        z_score = stats.norm.ppf(pval / 2) if pval > 0 else np.nan
+        effect_r = abs(z_score) / np.sqrt(n) if not np.isnan(z_score) else np.nan
+        results.append({
+            'measurement': meas, 'n': n,
+            'median_pre': round(med_pre, 2), 'median_post': round(med_post, 2),
+            'median_change': round(med_change, 2),
+            'pct_change': round(pct_change, 1),
+            'effect_r': round(effect_r, 3),
+            'p_raw': pval
+        })
+    if not results:
+        return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'], method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+
+def kruskal_between(paired_df, arms_col='treatment_arm'):
+    """Between-group Kruskal-Wallis on change scores across arms."""
+    results = []
+    for meas in paired_df['measurement_label'].unique():
+        sub = paired_df[paired_df['measurement_label'] == meas].dropna(subset=['pre_value', 'post_value'])
+        sub = sub.copy()
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        groups = []
+        group_labels = []
+        for arm in sub[arms_col].unique():
+            g = sub[sub[arms_col] == arm]['change']
+            if len(g) >= 5:
+                groups.append(g)
+                group_labels.append(arm)
+        if len(groups) < 2:
+            continue
+        try:
+            stat, pval = stats.kruskal(*groups)
+        except:
+            continue
+        # Eta-squared approximation: H / (N-1)
+        N_total = sum(len(g) for g in groups)
+        eta_sq = (stat - len(groups) + 1) / (N_total - 1) if N_total > 1 else np.nan
+        results.append({
+            'measurement': meas,
+            'n_groups': len(groups),
+            'n_total': N_total,
+            'H_statistic': round(stat, 2),
+            'eta_squared': round(max(eta_sq, 0), 4),
+            'p_raw': pval,
+            'groups_tested': ', '.join(group_labels)
+        })
+    if not results:
+        return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'], method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+
+def pairwise_mannwhitney(paired_df, arms_col='treatment_arm'):
+    """Pairwise Mann-Whitney U for all arm pairs, per measurement."""
+    results = []
+    for meas in paired_df['measurement_label'].unique():
+        sub = paired_df[paired_df['measurement_label'] == meas].dropna(subset=['pre_value', 'post_value'])
+        sub = sub.copy()
+        sub['change'] = sub['post_value'] - sub['pre_value']
+        arms = [a for a in sub[arms_col].unique() if len(sub[sub[arms_col] == a]) >= 5]
+        for a1, a2 in combinations(arms, 2):
+            g1 = sub[sub[arms_col] == a1]['change']
+            g2 = sub[sub[arms_col] == a2]['change']
+            if len(g1) < 5 or len(g2) < 5:
+                continue
+            try:
+                stat, pval = stats.mannwhitneyu(g1, g2, alternative='two-sided')
+            except:
+                continue
+            # Effect size r = Z / sqrt(N)
+            n_total = len(g1) + len(g2)
+            z = stats.norm.ppf(pval / 2) if pval > 0 else np.nan
+            r_eff = abs(z) / np.sqrt(n_total) if not np.isnan(z) else np.nan
+            results.append({
+                'measurement': meas,
+                'group_1': a1, 'group_2': a2,
+                'n_1': len(g1), 'n_2': len(g2),
+                'median_1': round(g1.median(), 2),
+                'median_2': round(g2.median(), 2),
+                'diff_medians': round(g1.median() - g2.median(), 2),
+                'effect_r': round(r_eff, 3),
+                'U_statistic': stat,
+                'p_raw': pval
+            })
+    if not results:
+        return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'], method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+
+def effect_vs_control(paired_df, control_arm='No_Therapy', arms_col='treatment_arm'):
+    """
+    For each treatment arm vs control, calculate:
+      - Difference in medians (change_treatment - change_control)
+      - Mann-Whitney U p-value
+      - If binary outcome: OR/RR where applicable
+    """
+    results = []
+    control_data = paired_df[paired_df[arms_col] == control_arm]
+    
+    for meas in paired_df['measurement_label'].unique():
+        ctrl = control_data[control_data['measurement_label'] == meas].dropna(subset=['pre_value', 'post_value'])
+        ctrl_change = ctrl['post_value'] - ctrl['pre_value']
+        if len(ctrl_change) < 5:
+            continue
+        
+        for arm in paired_df[arms_col].unique():
+            if arm == control_arm:
+                continue
+            trt = paired_df[(paired_df[arms_col] == arm) & 
+                           (paired_df['measurement_label'] == meas)].dropna(subset=['pre_value', 'post_value'])
+            trt_change = trt['post_value'] - trt['pre_value']
+            if len(trt_change) < 3:
+                continue
+            
+            try:
+                stat, pval = stats.mannwhitneyu(trt_change, ctrl_change, alternative='two-sided')
+            except:
+                pval = np.nan
+            
+            med_trt = trt_change.median()
+            med_ctrl = ctrl_change.median()
+            
+            # Proportion improving (change < 0 for glucose/HbA1c etc)
+            prop_trt_improved = (trt_change < 0).mean()
+            prop_ctrl_improved = (ctrl_change < 0).mean()
+            
+            # Risk Ratio
+            rr = prop_trt_improved / prop_ctrl_improved if prop_ctrl_improved > 0 else np.nan
+            
+            # Odds Ratio
+            odds_trt = prop_trt_improved / (1 - prop_trt_improved) if prop_trt_improved < 1 else np.nan
+            odds_ctrl = prop_ctrl_improved / (1 - prop_ctrl_improved) if prop_ctrl_improved < 1 and prop_ctrl_improved > 0 else np.nan
+            odds_ratio = odds_trt / odds_ctrl if odds_ctrl and not np.isnan(odds_ctrl) and odds_ctrl > 0 else np.nan
+            
+            results.append({
+                'measurement': meas,
+                'treatment': arm,
+                'n_treatment': len(trt_change),
+                'n_control': len(ctrl_change),
+                'median_change_trt': round(med_trt, 2),
+                'median_change_ctrl': round(med_ctrl, 2),
+                'difference': round(med_trt - med_ctrl, 2),
+                'prop_improved_trt': round(prop_trt_improved, 3),
+                'prop_improved_ctrl': round(prop_ctrl_improved, 3),
+                'RR_improvement': round(rr, 2) if not np.isnan(rr) else np.nan,
+                'OR_improvement': round(odds_ratio, 2) if not np.isnan(odds_ratio) else np.nan,
+                'p_raw': pval
+            })
+    
+    if not results:
+        return pd.DataFrame()
+    df = pd.DataFrame(results)
+    if len(df) > 1:
+        _, df['p_adj'], _, _ = multipletests(df['p_raw'].fillna(1), method='fdr_bh')
+    else:
+        df['p_adj'] = df['p_raw']
+    df['significant'] = df['p_adj'] < 0.05
+    return df.sort_values('p_adj')
+
+
+def run_full_analysis(paired_data, arms_col='treatment_arm', label_prefix=''):
+    """Run complete analysis suite: within, between, pairwise, effect vs control."""
+    all_results = {}
+    
+    # Within-group per arm
+    within_results = []
+    for arm in paired_data[arms_col].unique():
+        arm_data = paired_data[paired_data[arms_col] == arm]
+        w = wilcoxon_within(arm_data)
+        if len(w) > 0:
+            w.insert(0, 'treatment_arm', arm)
+            within_results.append(w)
+    if within_results:
+        all_results['within'] = pd.concat(within_results, ignore_index=True)
+    else:
+        all_results['within'] = pd.DataFrame()
+    
+    # Between-group
+    all_results['between'] = kruskal_between(paired_data, arms_col)
+    
+    # Pairwise
+    all_results['pairwise'] = pairwise_mannwhitney(paired_data, arms_col)
+    
+    # Effect vs control
+    all_results['vs_control'] = effect_vs_control(paired_data, 'No_Therapy', arms_col)
+    
+    return all_results
+
+
+print("Statistical functions loaded.")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 2: PCOS COHORT BUILD                                                   ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 2: Building PCOS cohort")
+print("=" * 80)
+
+pcos_ids_str = ','.join(str(i) for i in CONCEPTS['PCOS'])
+
+cohort_q = f"""
+WITH pcos_dx AS (
+    SELECT 
+        person_id,
+        MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str})
+    GROUP BY person_id
+),
+demographics AS (
+    SELECT 
+        p.person_id,
+        p.year_of_birth,
+        p.gender_concept_id,
+        COALESCE(c_race.concept_name, 'Unknown') AS race,
+        COALESCE(c_eth.concept_name, 'Unknown') AS ethnicity
+    FROM `{dataset}.person` p
+    LEFT JOIN `{dataset}.concept` c_race ON p.race_concept_id = c_race.concept_id
+    LEFT JOIN `{dataset}.concept` c_eth ON p.ethnicity_concept_id = c_eth.concept_id
+    WHERE p.gender_concept_id = 45878463  -- Female (AoU PMI concept)
+)
+SELECT 
+    pd.person_id,
+    pd.pcos_index_date,
+    d.year_of_birth,
+    EXTRACT(YEAR FROM pd.pcos_index_date) - d.year_of_birth AS age_at_dx,
+    d.race,
+    d.ethnicity
+FROM pcos_dx pd
+JOIN demographics d ON pd.person_id = d.person_id
+WHERE (EXTRACT(YEAR FROM pd.pcos_index_date) - d.year_of_birth) BETWEEN 18 AND 50
+"""
+
+cohort = pd.read_gbq(cohort_q, dialect='standard', progress_bar_type='tqdm')
+print(f"PCOS cohort: {len(cohort)} patients")
+print(f"  Age: mean={cohort['age_at_dx'].mean():.1f}, median={cohort['age_at_dx'].median():.0f}")
+
+# Simplify race
+def classify_race(r):
+    if r is None:
+        return 'Other'
+    r_lower = r.lower()
+    if 'white' in r_lower:
+        return 'White'
+    elif 'black' in r_lower or 'african' in r_lower:
+        return 'Black'
+    elif 'asian' in r_lower:
+        return 'Asian'
+    elif 'hispanic' in r_lower or 'latino' in r_lower:
+        return 'Hispanic'
+    else:
+        return 'Other'
+
+cohort['race_cat'] = cohort['race'].apply(classify_race)
+print(f"  Race: {cohort['race_cat'].value_counts().to_dict()}")
+
+person_ids_list = cohort['person_id'].tolist()
+# For BigQuery IN clauses with large lists, create temp table
+cohort_ids_str = ','.join(str(i) for i in person_ids_list[:50000])  # safety limit
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 3: TREATMENT ARM ASSIGNMENT (via concept_ancestor)                      ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 3: Assigning treatment arms")
+print("=" * 80)
+
+met_ids_str = ','.join(str(i) for i in CONCEPTS['METFORMIN'])
+glp1_ids_str = ','.join(str(i) for i in ALL_GLP1_INGREDIENTS)
+
+drug_q = f"""
+WITH cohort_ids AS (
+    SELECT person_id, MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str})
+    GROUP BY person_id
+),
+-- Metformin exposures via concept_ancestor
+met_exp AS (
+    SELECT DISTINCT de.person_id, 'metformin' AS drug_class
+    FROM `{dataset}.drug_exposure` de
+    JOIN `{dataset}.concept_ancestor` ca 
+        ON de.drug_concept_id = ca.descendant_concept_id
+    JOIN cohort_ids ci ON de.person_id = ci.person_id
+    WHERE ca.ancestor_concept_id IN ({met_ids_str})
+      AND de.drug_exposure_start_date BETWEEN 
+          ci.pcos_index_date AND DATE_ADD(ci.pcos_index_date, INTERVAL {DRUG_END_DAYS} DAY)
+),
+-- GLP-1 RA exposures via concept_ancestor
+glp1_exp AS (
+    SELECT DISTINCT de.person_id, 'glp1_ra' AS drug_class
+    FROM `{dataset}.drug_exposure` de
+    JOIN `{dataset}.concept_ancestor` ca 
+        ON de.drug_concept_id = ca.descendant_concept_id
+    JOIN cohort_ids ci ON de.person_id = ci.person_id
+    WHERE ca.ancestor_concept_id IN ({glp1_ids_str})
+      AND de.drug_exposure_start_date BETWEEN 
+          ci.pcos_index_date AND DATE_ADD(ci.pcos_index_date, INTERVAL {DRUG_END_DAYS} DAY)
+)
+SELECT 
+    person_id,
+    MAX(CASE WHEN drug_class = 'metformin' THEN 1 ELSE 0 END) AS has_metformin,
+    MAX(CASE WHEN drug_class = 'glp1_ra' THEN 1 ELSE 0 END) AS has_glp1
+FROM (
+    SELECT * FROM met_exp
+    UNION ALL
+    SELECT * FROM glp1_exp
+)
+GROUP BY person_id
+"""
+
+drugs_df = pd.read_gbq(drug_q, dialect='standard', progress_bar_type='tqdm')
+
+# Assign treatment arms
+def assign_arm(row):
+    if row.get('has_metformin', 0) == 1 and row.get('has_glp1', 0) == 1:
+        return 'Combination'
+    elif row.get('has_glp1', 0) == 1:
+        return 'GLP1_RA'
+    elif row.get('has_metformin', 0) == 1:
+        return 'Metformin'
+    else:
+        return 'No_Therapy'
+
+if len(drugs_df) > 0:
+    drugs_df['treatment_arm'] = drugs_df.apply(assign_arm, axis=1)
+    cohort = cohort.merge(drugs_df[['person_id', 'treatment_arm']], on='person_id', how='left')
+    cohort['treatment_arm'] = cohort['treatment_arm'].fillna('No_Therapy')
+else:
+    print("⚠️ No drug records found! All patients assigned No_Therapy.")
+    cohort['treatment_arm'] = 'No_Therapy'
+
+print(f"\nTreatment arms:")
+print(cohort['treatment_arm'].value_counts())
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 4: LABORATORY MEASUREMENTS PULL                                         ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 4: Pulling laboratory measurements")
+print("=" * 80)
+
+meas_q = f"""
+WITH cohort_ids AS (
+    SELECT person_id, MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str})
+    GROUP BY person_id
+)
+SELECT 
+    m.person_id,
+    m.measurement_concept_id,
+    m.value_as_number,
+    m.measurement_date,
+    ci.pcos_index_date,
+    DATE_DIFF(m.measurement_date, ci.pcos_index_date, DAY) AS days_from_index
+FROM `{dataset}.measurement` m
+JOIN cohort_ids ci ON m.person_id = ci.person_id
+WHERE m.measurement_concept_id IN ({ALL_MEAS_IDS_STR})
+  AND m.value_as_number IS NOT NULL
+  AND (
+      -- Pre window: 180 days before index
+      (m.measurement_date BETWEEN DATE_SUB(ci.pcos_index_date, INTERVAL {PRE_WINDOW_DAYS} DAY) 
+                          AND ci.pcos_index_date)
+      OR
+      -- Post window: 180-730 days after index
+      (m.measurement_date BETWEEN DATE_ADD(ci.pcos_index_date, INTERVAL {POST_START_DAYS} DAY)
+                          AND DATE_ADD(ci.pcos_index_date, INTERVAL {POST_END_DAYS} DAY))
+  )
+"""
+
+meas_raw = pd.read_gbq(meas_q, dialect='standard', progress_bar_type='tqdm')
+print(f"Raw measurement records: {len(meas_raw)}")
+
+# Map to labels
+meas_raw['measurement_label'] = meas_raw['measurement_concept_id'].map(MEAS_ID_TO_LABEL)
+
+# Assign period
+meas_raw['period'] = np.where(meas_raw['days_from_index'] <= 0, 'pre', 'post')
+
+# Aggregate: take median per person per measurement per period
+meas_agg = meas_raw.groupby(['person_id', 'measurement_label', 'period'])['value_as_number'].median().reset_index()
+meas_agg.columns = ['person_id', 'measurement_label', 'period', 'value']
+
+# Pivot to create paired pre/post dataset
+meas_pre = meas_agg[meas_agg['period'] == 'pre'].rename(columns={'value': 'pre_value'}).drop('period', axis=1)
+meas_post = meas_agg[meas_agg['period'] == 'post'].rename(columns={'value': 'post_value'}).drop('period', axis=1)
+
+paired = meas_pre.merge(meas_post, on=['person_id', 'measurement_label'], how='inner')
+paired = paired.merge(cohort[['person_id', 'treatment_arm', 'race_cat', 'age_at_dx']], on='person_id', how='left')
+
+print(f"Paired pre/post records: {len(paired)}")
+print(f"Unique patients with paired data: {paired['person_id'].nunique()}")
+print(f"\nPaired records by measurement:")
+print(paired.groupby('measurement_label').size().sort_values(ascending=False))
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 5: COVARIATES                                                           ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 5: Pulling covariates")
+print("=" * 80)
+
+# -- BMI (closest to index date) --
+bmi_ids_str = ','.join(str(i) for i in CONCEPTS['BMI'])
+bmi_q = f"""
+WITH cohort_ids AS (
+    SELECT person_id, MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str})
+    GROUP BY person_id
+),
+bmi_ranked AS (
+    SELECT m.person_id, m.value_as_number AS bmi,
+           ROW_NUMBER() OVER (PARTITION BY m.person_id 
+                              ORDER BY ABS(DATE_DIFF(m.measurement_date, ci.pcos_index_date, DAY))) AS rn
+    FROM `{dataset}.measurement` m
+    JOIN cohort_ids ci ON m.person_id = ci.person_id
+    WHERE m.measurement_concept_id IN ({bmi_ids_str})
+      AND m.value_as_number BETWEEN 10 AND 80
+      AND m.measurement_date BETWEEN DATE_SUB(ci.pcos_index_date, INTERVAL 365 DAY)
+                              AND DATE_ADD(ci.pcos_index_date, INTERVAL 365 DAY)
+)
+SELECT person_id, bmi FROM bmi_ranked WHERE rn = 1
+"""
+bmi_df = pd.read_gbq(bmi_q, dialect='standard', progress_bar_type='tqdm')
+
+def bmi_category(b):
+    if b < 18.5: return 'Underweight'
+    elif b < 25: return 'Normal'
+    elif b < 30: return 'Overweight'
+    else: return 'Obese'
+
+bmi_df['bmi_cat'] = bmi_df['bmi'].apply(bmi_category)
+cohort = cohort.merge(bmi_df, on='person_id', how='left')
+print(f"BMI available for: {bmi_df['person_id'].nunique()} patients")
+print(f"  Categories: {cohort['bmi_cat'].value_counts().to_dict()}")
+
+# -- DM2 --
+dm2_ids_str = ','.join(str(i) for i in CONCEPTS['DM2'])
+dm2_q = f"""
+SELECT DISTINCT person_id, 1 AS has_dm2
+FROM `{dataset}.condition_occurrence`
+WHERE condition_concept_id IN ({dm2_ids_str})
+  AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+"""
+dm2_df = pd.read_gbq(dm2_q, dialect='standard', progress_bar_type='tqdm')
+cohort = cohort.merge(dm2_df, on='person_id', how='left')
+cohort['has_dm2'] = cohort['has_dm2'].fillna(0).astype(int)
+print(f"DM2: {cohort['has_dm2'].sum()} patients ({cohort['has_dm2'].mean()*100:.1f}%)")
+
+# -- Smoking (survey-based) --
+smoke_q = f"""
+SELECT DISTINCT person_id, 
+    answer_concept_id,
+    CASE 
+        WHEN answer_concept_id = {CONCEPTS['SMOKE_A_NEVER'][0]} THEN 'Never'
+        WHEN answer_concept_id = {CONCEPTS['SMOKE_A_PAST'][0]} THEN 'Former'
+        WHEN answer_concept_id IN ({CONCEPTS['SMOKE_A_DAILY'][0]}, {CONCEPTS['SMOKE_A_SOME'][0]}) THEN 'Current'
+        ELSE 'Unknown'
+    END AS smoking_status
+FROM `{dataset}.ds_survey`
+WHERE question_concept_id = {CONCEPTS['SMOKE_Q'][0]}
+  AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+"""
+smoke_df = pd.read_gbq(smoke_q, dialect='standard', progress_bar_type='tqdm')
+# Take most recent if multiple
+smoke_df = smoke_df.drop_duplicates(subset='person_id', keep='first')
+cohort = cohort.merge(smoke_df[['person_id', 'smoking_status']], on='person_id', how='left')
+cohort['smoking_status'] = cohort['smoking_status'].fillna('Unknown')
+print(f"Smoking: {cohort['smoking_status'].value_counts().to_dict()}")
+
+# -- Menstrual conditions (any time, for prevalence) --
+menstrual_ids_str = ','.join(str(i) for i in ALL_MENSTRUAL_CONCEPTS)
+menstrual_q = f"""
+SELECT DISTINCT person_id, 1 AS has_menstrual_hx
+FROM `{dataset}.condition_occurrence`
+WHERE condition_concept_id IN ({menstrual_ids_str})
+  AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+"""
+menstrual_df = pd.read_gbq(menstrual_q, dialect='standard', progress_bar_type='tqdm')
+cohort = cohort.merge(menstrual_df, on='person_id', how='left')
+cohort['has_menstrual_hx'] = cohort['has_menstrual_hx'].fillna(0).astype(int)
+print(f"Menstrual conditions: {cohort['has_menstrual_hx'].sum()} ({cohort['has_menstrual_hx'].mean()*100:.1f}%)")
+
+# -- Infertility (any time) --
+infert_ids_str = ','.join(str(i) for i in ALL_INFERTILITY_CONCEPTS)
+infert_q = f"""
+SELECT DISTINCT person_id, 1 AS has_infertility_hx
+FROM `{dataset}.condition_occurrence`
+WHERE condition_concept_id IN ({infert_ids_str})
+  AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+"""
+infert_df = pd.read_gbq(infert_q, dialect='standard', progress_bar_type='tqdm')
+cohort = cohort.merge(infert_df, on='person_id', how='left')
+cohort['has_infertility_hx'] = cohort['has_infertility_hx'].fillna(0).astype(int)
+print(f"Infertility: {cohort['has_infertility_hx'].sum()} ({cohort['has_infertility_hx'].mean()*100:.1f}%)")
+
+# -- Obesity condition --
+obesity_ids_str = ','.join(str(i) for i in CONCEPTS['OBESITY'] + CONCEPTS['MORBID_OBESITY'])
+obesity_q = f"""
+SELECT DISTINCT person_id, 1 AS has_obesity_dx
+FROM `{dataset}.condition_occurrence`
+WHERE condition_concept_id IN ({obesity_ids_str})
+  AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+"""
+obesity_df = pd.read_gbq(obesity_q, dialect='standard', progress_bar_type='tqdm')
+cohort = cohort.merge(obesity_df, on='person_id', how='left')
+cohort['has_obesity_dx'] = cohort['has_obesity_dx'].fillna(0).astype(int)
+print(f"Obesity dx: {cohort['has_obesity_dx'].sum()} ({cohort['has_obesity_dx'].mean()*100:.1f}%)")
+
+# -- Hirsutism, Acne, Metabolic Syndrome --
+for cond_name, cond_ids in [('hirsutism', CONCEPTS['HIRSUTISM']), 
+                              ('acne', CONCEPTS['ACNE']),
+                              ('met_syndrome', CONCEPTS['METABOLIC_SYND'])]:
+    ids_str = ','.join(str(i) for i in cond_ids)
+    q = f"""
+    SELECT DISTINCT person_id, 1 AS has_{cond_name}
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({ids_str})
+      AND person_id IN (SELECT person_id FROM `{dataset}.condition_occurrence` WHERE condition_concept_id IN ({pcos_ids_str}))
+    """
+    df = pd.read_gbq(q, dialect='standard', progress_bar_type='tqdm')
+    cohort = cohort.merge(df, on='person_id', how='left')
+    cohort[f'has_{cond_name}'] = cohort[f'has_{cond_name}'].fillna(0).astype(int)
+    print(f"  {cond_name}: {cohort[f'has_{cond_name}'].sum()}")
+
+# Merge covariates into paired data
+covariate_cols = ['person_id', 'bmi', 'bmi_cat', 'has_dm2', 'smoking_status', 
+                  'has_menstrual_hx', 'has_infertility_hx', 'has_obesity_dx',
+                  'has_hirsutism', 'has_acne', 'has_met_syndrome']
+paired = paired.merge(cohort[[c for c in covariate_cols if c in cohort.columns]], 
+                      on='person_id', how='left', suffixes=('', '_dup'))
+# Drop duplicate columns
+paired = paired[[c for c in paired.columns if not c.endswith('_dup')]]
+
+print(f"\nPaired dataset with covariates: {len(paired)} records, {paired['person_id'].nunique()} patients")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 6: TABLE 1 — COHORT CHARACTERISTICS                                    ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 6: Table 1")
+print("=" * 80)
+
+def table1_arm(df, arm_name):
+    n = len(df)
+    row = {'Treatment': arm_name, 'N': n}
+    row['Age_mean_sd'] = f"{df['age_at_dx'].mean():.1f} ({df['age_at_dx'].std():.1f})"
+    if 'bmi' in df.columns:
+        bmi_valid = df['bmi'].dropna()
+        row['BMI_mean_sd'] = f"{bmi_valid.mean():.1f} ({bmi_valid.std():.1f})" if len(bmi_valid) > 0 else 'N/A'
+        for cat in ['Underweight', 'Normal', 'Overweight', 'Obese']:
+            nc = (df['bmi_cat'] == cat).sum()
+            row[f'BMI_{cat}'] = f"{nc} ({nc/n*100:.1f}%)" if n > 0 else '0'
+    for race in ['White', 'Black', 'Asian', 'Hispanic', 'Other']:
+        nc = (df['race_cat'] == race).sum()
+        row[f'Race_{race}'] = f"{nc} ({nc/n*100:.1f}%)" if n > 0 else '0'
+    for col_name, col_label in [('has_dm2', 'DM2'), ('has_menstrual_hx', 'Menstrual'),
+                                 ('has_infertility_hx', 'Infertility'), ('has_obesity_dx', 'Obesity_dx'),
+                                 ('has_hirsutism', 'Hirsutism'), ('has_acne', 'Acne')]:
+        if col_name in df.columns:
+            nc = df[col_name].sum()
+            row[col_label] = f"{nc} ({nc/n*100:.1f}%)" if n > 0 else '0'
+    if 'smoking_status' in df.columns:
+        for s in ['Never', 'Former', 'Current', 'Unknown']:
+            nc = (df['smoking_status'] == s).sum()
+            row[f'Smoking_{s}'] = f"{nc} ({nc/n*100:.1f}%)" if n > 0 else '0'
+    return row
+
+table1_rows = []
+for arm in ['No_Therapy', 'Metformin', 'GLP1_RA', 'Combination']:
+    arm_df = cohort[cohort['treatment_arm'] == arm]
+    if len(arm_df) > 0:
+        table1_rows.append(table1_arm(arm_df, arm))
+
+table1 = pd.DataFrame(table1_rows)
+print(table1.T.to_string())
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 7: PRIMARY ANALYSIS                                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 7: Primary Analysis — Full Cohort")
+print("=" * 80)
+
+primary_results = run_full_analysis(paired)
+
+print("\n--- Within-Group Results ---")
+if len(primary_results['within']) > 0:
+    print(primary_results['within'].to_string(index=False))
+    
+print("\n--- Between-Group (Kruskal-Wallis) Results ---")
+if len(primary_results['between']) > 0:
+    print(primary_results['between'].to_string(index=False))
+
+print("\n--- Pairwise (Mann-Whitney U) Results ---")
+if len(primary_results['pairwise']) > 0:
+    print(primary_results['pairwise'].to_string(index=False))
+
+print("\n--- Effect vs No_Therapy Control ---")
+if len(primary_results['vs_control']) > 0:
+    print(primary_results['vs_control'].to_string(index=False))
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 8: SUBGROUP — BMI                                                       ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 8: Subgroup Analysis — BMI Category")
+print("=" * 80)
+
+bmi_results = {}
+for cat in ['Underweight', 'Normal', 'Overweight', 'Obese']:
+    sub = paired[paired['bmi_cat'] == cat]
+    if len(sub) < 10:
+        print(f"\n  {cat}: Too few records ({len(sub)}), skipping.")
+        continue
+    print(f"\n  {cat}: {len(sub)} records, {sub['person_id'].nunique()} patients")
+    bmi_results[cat] = run_full_analysis(sub)
+    
+    # Print summary
+    if len(bmi_results[cat]['between']) > 0:
+        sig = bmi_results[cat]['between'][bmi_results[cat]['between']['significant']]
+        print(f"    Significant between-group: {len(sig)} measurements")
+    if len(bmi_results[cat]['vs_control']) > 0:
+        sig_ctrl = bmi_results[cat]['vs_control'][bmi_results[cat]['vs_control']['significant']]
+        print(f"    Significant vs control: {len(sig_ctrl)} comparisons")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 9: SUBGROUP — RACE                                                      ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 9: Subgroup Analysis — Race")
+print("=" * 80)
+
+race_results = {}
+for race in ['White', 'Black', 'Asian', 'Hispanic', 'Other']:
+    sub = paired[paired['race_cat'] == race]
+    if len(sub) < 10:
+        print(f"\n  {race}: Too few records ({len(sub)}), skipping.")
+        continue
+    print(f"\n  {race}: {len(sub)} records, {sub['person_id'].nunique()} patients")
+    race_results[race] = run_full_analysis(sub)
+    
+    if len(race_results[race]['between']) > 0:
+        sig = race_results[race]['between'][race_results[race]['between']['significant']]
+        print(f"    Significant between-group: {len(sig)} measurements")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 10: MENSTRUAL & INFERTILITY — INCIDENCE + RESOLUTION DESIGN             ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 10: Menstrual Conditions & Infertility — Incidence & Resolution")
+print("=" * 80)
+
+# ── 10A: INCIDENCE — Patients WITHOUT condition pre-index, develop it post-index ──
+# Question: Do treatment arms differ in NEW onset of menstrual/infertility conditions?
+
+menstrual_ids_str = ','.join(str(i) for i in ALL_MENSTRUAL_CONCEPTS)
+infert_ids_str = ','.join(str(i) for i in ALL_INFERTILITY_CONCEPTS)
+
+incidence_q = f"""
+WITH cohort_ids AS (
+    SELECT person_id, MIN(condition_start_date) AS pcos_index_date
+    FROM `{dataset}.condition_occurrence`
+    WHERE condition_concept_id IN ({pcos_ids_str})
+    GROUP BY person_id
+),
+-- Patients with menstrual condition BEFORE index
+pre_menstrual AS (
+    SELECT DISTINCT co.person_id
+    FROM `{dataset}.condition_occurrence` co
+    JOIN cohort_ids ci ON co.person_id = ci.person_id
+    WHERE co.condition_concept_id IN ({menstrual_ids_str})
+      AND co.condition_start_date < ci.pcos_index_date
+),
+-- Patients with menstrual condition AFTER index (180-730 days)
+post_menstrual AS (
+    SELECT DISTINCT co.person_id
+    FROM `{dataset}.condition_occurrence` co
+    JOIN cohort_ids ci ON co.person_id = ci.person_id
+    WHERE co.condition_concept_id IN ({menstrual_ids_str})
+      AND co.condition_start_date BETWEEN 
+          DATE_ADD(ci.pcos_index_date, INTERVAL 180 DAY)
+          AND DATE_ADD(ci.pcos_index_date, INTERVAL 730 DAY)
+),
+-- Pre infertility
+pre_infert AS (
+    SELECT DISTINCT co.person_id
+    FROM `{dataset}.condition_occurrence` co
+    JOIN cohort_ids ci ON co.person_id = ci.person_id
+    WHERE co.condition_concept_id IN ({infert_ids_str})
+      AND co.condition_start_date < ci.pcos_index_date
+),
+-- Post infertility
+post_infert AS (
+    SELECT DISTINCT co.person_id
+    FROM `{dataset}.condition_occurrence` co
+    JOIN cohort_ids ci ON co.person_id = ci.person_id
+    WHERE co.condition_concept_id IN ({infert_ids_str})
+      AND co.condition_start_date BETWEEN 
+          DATE_ADD(ci.pcos_index_date, INTERVAL 180 DAY)
+          AND DATE_ADD(ci.pcos_index_date, INTERVAL 730 DAY)
+)
+SELECT 
+    ci.person_id,
+    CASE WHEN pm.person_id IS NOT NULL THEN 1 ELSE 0 END AS pre_menstrual,
+    CASE WHEN pom.person_id IS NOT NULL THEN 1 ELSE 0 END AS post_menstrual,
+    CASE WHEN pi.person_id IS NOT NULL THEN 1 ELSE 0 END AS pre_infert,
+    CASE WHEN poi.person_id IS NOT NULL THEN 1 ELSE 0 END AS post_infert
+FROM cohort_ids ci
+LEFT JOIN pre_menstrual pm ON ci.person_id = pm.person_id
+LEFT JOIN post_menstrual pom ON ci.person_id = pom.person_id
+LEFT JOIN pre_infert pi ON ci.person_id = pi.person_id
+LEFT JOIN post_infert poi ON ci.person_id = poi.person_id
+"""
+
+incidence_df = pd.read_gbq(incidence_q, dialect='standard', progress_bar_type='tqdm')
+incidence_df = incidence_df.merge(cohort[['person_id', 'treatment_arm']], on='person_id', how='inner')
+
+print(f"Incidence/Resolution data: {len(incidence_df)} patients")
+
+# ── 10A-1: INCIDENCE — No prior menstrual → new menstrual ──
+no_prior_menstrual = incidence_df[incidence_df['pre_menstrual'] == 0]
+print(f"\n--- INCIDENCE: Menstrual Conditions (no prior history) ---")
+print(f"  Patients without prior menstrual conditions: {len(no_prior_menstrual)}")
+
+incidence_menstrual = no_prior_menstrual.groupby('treatment_arm').agg(
+    n_total=('person_id', 'count'),
+    n_new_menstrual=('post_menstrual', 'sum')
+).reset_index()
+incidence_menstrual['incidence_rate'] = (incidence_menstrual['n_new_menstrual'] / incidence_menstrual['n_total'] * 100).round(2)
+print(incidence_menstrual.to_string(index=False))
+
+# Chi-squared test
+contingency_m = no_prior_menstrual.groupby('treatment_arm')['post_menstrual'].agg(['sum', 'count']).reset_index()
+contingency_m['no_event'] = contingency_m['count'] - contingency_m['sum']
+if len(contingency_m) >= 2:
+    table = contingency_m[['sum', 'no_event']].values
+    try:
+        chi2, p_chi, dof, expected = stats.chi2_contingency(table)
+        print(f"  Chi-squared test: chi2={chi2:.2f}, p={p_chi:.4f}")
+    except:
+        print("  Chi-squared test: could not compute")
+
+# OR/RR vs No_Therapy for each treatment arm
+print("\n  OR/RR for new menstrual conditions vs No_Therapy:")
+ctrl_m = no_prior_menstrual[no_prior_menstrual['treatment_arm'] == 'No_Therapy']
+a_ctrl = ctrl_m['post_menstrual'].sum()
+b_ctrl = len(ctrl_m) - a_ctrl
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    trt_m = no_prior_menstrual[no_prior_menstrual['treatment_arm'] == arm]
+    if len(trt_m) < 1:
+        continue
+    a_trt = trt_m['post_menstrual'].sum()
+    b_trt = len(trt_m) - a_trt
+    # RR
+    rate_trt = a_trt / len(trt_m) if len(trt_m) > 0 else 0
+    rate_ctrl = a_ctrl / len(ctrl_m) if len(ctrl_m) > 0 else 0
+    rr = rate_trt / rate_ctrl if rate_ctrl > 0 else np.nan
+    # OR
+    or_val = (a_trt * b_ctrl) / (b_trt * a_ctrl) if (b_trt > 0 and a_ctrl > 0) else np.nan
+    # Fisher exact
+    try:
+        odds_r, p_fisher = stats.fisher_exact([[a_trt, b_trt], [a_ctrl, b_ctrl]])
+    except:
+        p_fisher = np.nan
+    print(f"    {arm}: n={len(trt_m)}, events={a_trt}, rate={rate_trt*100:.1f}%, RR={rr:.2f}, OR={or_val:.2f}, p_fisher={p_fisher:.4f}")
+
+# ── 10A-2: INCIDENCE — No prior infertility → new infertility ──
+no_prior_infert = incidence_df[incidence_df['pre_infert'] == 0]
+print(f"\n--- INCIDENCE: Infertility (no prior history) ---")
+print(f"  Patients without prior infertility: {len(no_prior_infert)}")
+
+incidence_infert = no_prior_infert.groupby('treatment_arm').agg(
+    n_total=('person_id', 'count'),
+    n_new_infert=('post_infert', 'sum')
+).reset_index()
+incidence_infert['incidence_rate'] = (incidence_infert['n_new_infert'] / incidence_infert['n_total'] * 100).round(2)
+print(incidence_infert.to_string(index=False))
+
+# OR/RR vs No_Therapy
+print("\n  OR/RR for new infertility vs No_Therapy:")
+ctrl_i = no_prior_infert[no_prior_infert['treatment_arm'] == 'No_Therapy']
+a_ctrl_i = ctrl_i['post_infert'].sum()
+b_ctrl_i = len(ctrl_i) - a_ctrl_i
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    trt_i = no_prior_infert[no_prior_infert['treatment_arm'] == arm]
+    if len(trt_i) < 1:
+        continue
+    a_trt_i = trt_i['post_infert'].sum()
+    b_trt_i = len(trt_i) - a_trt_i
+    rate_trt = a_trt_i / len(trt_i) if len(trt_i) > 0 else 0
+    rate_ctrl = a_ctrl_i / len(ctrl_i) if len(ctrl_i) > 0 else 0
+    rr = rate_trt / rate_ctrl if rate_ctrl > 0 else np.nan
+    or_val = (a_trt_i * b_ctrl_i) / (b_trt_i * a_ctrl_i) if (b_trt_i > 0 and a_ctrl_i > 0) else np.nan
+    try:
+        odds_r, p_fisher = stats.fisher_exact([[a_trt_i, b_trt_i], [a_ctrl_i, b_ctrl_i]])
+    except:
+        p_fisher = np.nan
+    print(f"    {arm}: n={len(trt_i)}, events={a_trt_i}, rate={rate_trt*100:.1f}%, RR={rr:.2f}, OR={or_val:.2f}, p_fisher={p_fisher:.4f}")
+
+# ── 10B: RESOLUTION — Patients WITH condition pre-index, no longer post-index ──
+print(f"\n--- RESOLUTION: Menstrual Conditions (had prior history) ---")
+prior_menstrual = incidence_df[incidence_df['pre_menstrual'] == 1]
+print(f"  Patients with prior menstrual conditions: {len(prior_menstrual)}")
+
+resolution_menstrual = prior_menstrual.groupby('treatment_arm').agg(
+    n_total=('person_id', 'count'),
+    n_still_has=('post_menstrual', 'sum')
+).reset_index()
+resolution_menstrual['n_resolved'] = resolution_menstrual['n_total'] - resolution_menstrual['n_still_has']
+resolution_menstrual['resolution_rate'] = (resolution_menstrual['n_resolved'] / resolution_menstrual['n_total'] * 100).round(2)
+print(resolution_menstrual.to_string(index=False))
+
+# OR/RR for resolution vs No_Therapy
+print("\n  OR/RR for menstrual resolution vs No_Therapy:")
+ctrl_res = prior_menstrual[prior_menstrual['treatment_arm'] == 'No_Therapy']
+resolved_ctrl = (ctrl_res['post_menstrual'] == 0).sum()
+not_resolved_ctrl = len(ctrl_res) - resolved_ctrl
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    trt_res = prior_menstrual[prior_menstrual['treatment_arm'] == arm]
+    if len(trt_res) < 1:
+        continue
+    resolved_trt = (trt_res['post_menstrual'] == 0).sum()
+    not_resolved_trt = len(trt_res) - resolved_trt
+    rate_trt = resolved_trt / len(trt_res) if len(trt_res) > 0 else 0
+    rate_ctrl = resolved_ctrl / len(ctrl_res) if len(ctrl_res) > 0 else 0
+    rr = rate_trt / rate_ctrl if rate_ctrl > 0 else np.nan
+    or_val = (resolved_trt * not_resolved_ctrl) / (not_resolved_trt * resolved_ctrl) if (not_resolved_trt > 0 and resolved_ctrl > 0) else np.nan
+    try:
+        odds_r, p_fisher = stats.fisher_exact([[resolved_trt, not_resolved_trt], [resolved_ctrl, not_resolved_ctrl]])
+    except:
+        p_fisher = np.nan
+    print(f"    {arm}: n={len(trt_res)}, resolved={resolved_trt}, rate={rate_trt*100:.1f}%, RR={rr:.2f}, OR={or_val:.2f}, p_fisher={p_fisher:.4f}")
+
+# ── 10B-2: RESOLUTION — Infertility ──
+print(f"\n--- RESOLUTION: Infertility (had prior history) ---")
+prior_infert = incidence_df[incidence_df['pre_infert'] == 1]
+print(f"  Patients with prior infertility: {len(prior_infert)}")
+
+resolution_infert = prior_infert.groupby('treatment_arm').agg(
+    n_total=('person_id', 'count'),
+    n_still_has=('post_infert', 'sum')
+).reset_index()
+resolution_infert['n_resolved'] = resolution_infert['n_total'] - resolution_infert['n_still_has']
+resolution_infert['resolution_rate'] = (resolution_infert['n_resolved'] / resolution_infert['n_total'] * 100).round(2)
+print(resolution_infert.to_string(index=False))
+
+print("\n  OR/RR for infertility resolution vs No_Therapy:")
+ctrl_res_i = prior_infert[prior_infert['treatment_arm'] == 'No_Therapy']
+resolved_ctrl_i = (ctrl_res_i['post_infert'] == 0).sum()
+not_resolved_ctrl_i = len(ctrl_res_i) - resolved_ctrl_i
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    trt_res_i = prior_infert[prior_infert['treatment_arm'] == arm]
+    if len(trt_res_i) < 1:
+        continue
+    resolved_trt_i = (trt_res_i['post_infert'] == 0).sum()
+    not_resolved_trt_i = len(trt_res_i) - resolved_trt_i
+    rate_trt = resolved_trt_i / len(trt_res_i) if len(trt_res_i) > 0 else 0
+    rate_ctrl = resolved_ctrl_i / len(ctrl_res_i) if len(ctrl_res_i) > 0 else 0
+    rr = rate_trt / rate_ctrl if rate_ctrl > 0 else np.nan
+    or_val = (resolved_trt_i * not_resolved_ctrl_i) / (not_resolved_trt_i * resolved_ctrl_i) if (not_resolved_trt_i > 0 and resolved_ctrl_i > 0) else np.nan
+    try:
+        odds_r, p_fisher = stats.fisher_exact([[resolved_trt_i, not_resolved_trt_i], [resolved_ctrl_i, not_resolved_ctrl_i]])
+    except:
+        p_fisher = np.nan
+    print(f"    {arm}: n={len(trt_res_i)}, resolved={resolved_trt_i}, rate={rate_trt*100:.1f}%, RR={rr:.2f}, OR={or_val:.2f}, p_fisher={p_fisher:.4f}")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 11: CONFOUNDER ANALYSIS — DM2                                            ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 11: Confounder Analysis — DM2 Status")
+print("=" * 80)
+print("Comparing full analysis results WITH vs WITHOUT DM2 patients")
+
+dm2_results = {}
+for dm2_status, label in [(1, 'DM2'), (0, 'Non_DM2')]:
+    sub = paired[paired['has_dm2'] == dm2_status]
+    if len(sub) < 10:
+        print(f"\n  {label}: Too few records ({len(sub)}), skipping.")
+        continue
+    print(f"\n  {label}: {len(sub)} records, {sub['person_id'].nunique()} patients")
+    dm2_results[label] = run_full_analysis(sub)
+    
+    if len(dm2_results[label]['between']) > 0:
+        sig = dm2_results[label]['between'][dm2_results[label]['between']['significant']]
+        print(f"    Significant between-group: {len(sig)} measurements")
+    if len(dm2_results[label]['vs_control']) > 0:
+        sig_ctrl = dm2_results[label]['vs_control'][dm2_results[label]['vs_control']['significant']]
+        print(f"    Significant vs control: {len(sig_ctrl)} comparisons")
+
+# Differential drug response: DM2 vs Non-DM2 within each treatment arm
+print("\n--- Differential Drug Response: DM2 vs Non-DM2 ---")
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    arm_data = paired[paired['treatment_arm'] == arm].copy()
+    arm_data['change'] = arm_data['post_value'] - arm_data['pre_value']
+    
+    for meas in arm_data['measurement_label'].unique():
+        dm2_change = arm_data[(arm_data['has_dm2'] == 1) & (arm_data['measurement_label'] == meas)]['change']
+        non_dm2_change = arm_data[(arm_data['has_dm2'] == 0) & (arm_data['measurement_label'] == meas)]['change']
+        
+        if len(dm2_change) < 5 or len(non_dm2_change) < 5:
+            continue
+        
+        try:
+            stat, pval = stats.mannwhitneyu(dm2_change, non_dm2_change, alternative='two-sided')
+            if pval < 0.1:  # Show trending results
+                print(f"  {arm} | {meas}: DM2 median={dm2_change.median():.2f} (n={len(dm2_change)}), "
+                      f"Non-DM2={non_dm2_change.median():.2f} (n={len(non_dm2_change)}), p={pval:.4f}")
+        except:
+            pass
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 12: CONFOUNDER ANALYSIS — SMOKING                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 12: Confounder Analysis — Smoking Status")
+print("=" * 80)
+
+smoking_results = {}
+for smoke_status in ['Never', 'Former', 'Current']:
+    sub = paired[paired['smoking_status'] == smoke_status]
+    if len(sub) < 10:
+        print(f"\n  {smoke_status}: Too few records ({len(sub)}), skipping.")
+        continue
+    print(f"\n  {smoke_status}: {len(sub)} records, {sub['person_id'].nunique()} patients")
+    smoking_results[smoke_status] = run_full_analysis(sub)
+    
+    if len(smoking_results[smoke_status]['between']) > 0:
+        sig = smoking_results[smoke_status]['between'][smoking_results[smoke_status]['between']['significant']]
+        print(f"    Significant between-group: {len(sig)} measurements")
+
+# Differential by smoking within each treatment arm
+print("\n--- Differential Drug Response: Never vs Current smokers ---")
+for arm in ['Metformin', 'GLP1_RA', 'Combination']:
+    arm_data = paired[paired['treatment_arm'] == arm].copy()
+    arm_data['change'] = arm_data['post_value'] - arm_data['pre_value']
+    
+    for meas in arm_data['measurement_label'].unique():
+        never_change = arm_data[(arm_data['smoking_status'] == 'Never') & (arm_data['measurement_label'] == meas)]['change']
+        current_change = arm_data[(arm_data['smoking_status'] == 'Current') & (arm_data['measurement_label'] == meas)]['change']
+        
+        if len(never_change) < 5 or len(current_change) < 5:
+            continue
+        
+        try:
+            stat, pval = stats.mannwhitneyu(never_change, current_change, alternative='two-sided')
+            if pval < 0.1:
+                print(f"  {arm} | {meas}: Never={never_change.median():.2f} (n={len(never_change)}), "
+                      f"Current={current_change.median():.2f} (n={len(current_change)}), p={pval:.4f}")
+        except:
+            pass
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║  PART 13: EXPORT ALL TABLES                                                    ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+print("\n" + "=" * 80)
+print("PART 13: Exporting all results")
+print("=" * 80)
+
+# Collect all dataframes for export
+export_dict = {
+    'table1': table1,
+    'primary_within': primary_results['within'],
+    'primary_between': primary_results['between'],
+    'primary_pairwise': primary_results['pairwise'],
+    'primary_vs_control': primary_results['vs_control'],
+    'incidence_menstrual': incidence_menstrual,
+    'incidence_infert': incidence_infert,
+    'resolution_menstrual': resolution_menstrual,
+    'resolution_infert': resolution_infert,
+}
+
+# Add BMI subgroup results
+for cat, res in bmi_results.items():
+    for key, df in res.items():
+        if len(df) > 0:
+            export_dict[f'bmi_{cat}_{key}'] = df
+
+# Add Race subgroup results
+for race, res in race_results.items():
+    for key, df in res.items():
+        if len(df) > 0:
+            export_dict[f'race_{race}_{key}'] = df
+
+# Add DM2 confounder results
+for label, res in dm2_results.items():
+    for key, df in res.items():
+        if len(df) > 0:
+            export_dict[f'dm2_{label}_{key}'] = df
+
+# Add smoking confounder results
+for label, res in smoking_results.items():
+    for key, df in res.items():
+        if len(df) > 0:
+            export_dict[f'smoking_{label}_{key}'] = df
+
+# Export to CSV files
+for name, df in export_dict.items():
+    if len(df) > 0:
+        df.to_csv(f'{name}.csv', index=False)
+        print(f"  Exported: {name}.csv ({len(df)} rows)")
+
+print("\n" + "=" * 80)
+print("MAIN ANALYSIS COMPLETE")
+print("=" * 80)
+print(f"""
+Summary:
+  Cohort: {len(cohort)} PCOS patients
+  Treatment arms: {cohort['treatment_arm'].value_counts().to_dict()}
+  Paired measurements: {len(paired)} records
+  Analyses completed:
+    - Primary (within/between/pairwise/vs_control)
+    - BMI subgroups ({len(bmi_results)} categories)
+    - Race subgroups ({len(race_results)} categories)  
+    - Menstrual incidence & resolution
+    - Infertility incidence & resolution
+    - DM2 confounder analysis
+    - Smoking confounder analysis
+  Total tables exported: {len(export_dict)}
+""")
