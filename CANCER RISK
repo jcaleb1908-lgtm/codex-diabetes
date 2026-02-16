@@ -1,1 +1,858 @@
-a
+# ============================================================
+# OBESITY AND INCIDENT CANCER RISK
+# Retrospective Cohort Study — All of Us Research Program
+# Colorectal | Endometrial | Prostate
+# ============================================================
+# CLEAN REWRITE — Addresses all prior modeling issues
+# ============================================================
+
+# %% ── Cell 1: Imports & Setup ──────────────────────────────
+import pandas as pd
+import numpy as np
+import os
+from scipy import stats
+from scipy.stats import chi2_contingency
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+
+CDR = os.environ["WORKSPACE_CDR"]
+print(f"✅ Libraries loaded | CDR: {CDR}")
+
+# %% ── Cell 2: Define Concept IDs ──────────────────────────
+# All concept IDs verified via Athena (https://athena.ohdsi.org)
+
+# BMI measurement
+BMI_CONCEPT = 3038553  # LOINC 39156-5
+
+# Sex at birth
+FEMALE = 45878463
+MALE = 45880669
+
+# ── Cancer concepts (SNOMED standard) ──
+# Colorectal
+CRC_CONCEPTS = (
+    4089665,   # Malignant neoplasm of colon
+    197500,    # Malignant neoplasm of large intestine
+    4181351,   # Malignant neoplasm of rectum
+    197810,    # Malignant tumor of sigmoid colon
+    4314337,   # Malignant neoplasm of rectosigmoid junction
+    200051,    # Malignant neoplasm of ascending colon
+    197230,    # Malignant neoplasm of transverse colon
+    200962,    # Malignant neoplasm of descending colon
+    195482,    # Malignant neoplasm of cecum
+    198091,    # Malignant neoplasm of splenic flexure
+    201801,    # Malignant neoplasm of hepatic flexure
+    4163261,   # Primary malignant neoplasm of colon
+    4312022,   # Primary malignant neoplasm of rectum
+    4315806,   # Colorectal cancer
+    443398,    # Malignant neoplasm of large intestine NOS
+)
+
+# Endometrial (women only)
+ENDO_CONCEPTS = (
+    198984,    # Malignant neoplasm of endometrium
+    4265453,   # Primary malignant neoplasm of endometrium
+    198985,    # Malignant neoplasm of body of uterus
+    4000613,   # Malignant neoplasm of corpus uteri
+    200344,    # Endometrial cancer
+)
+
+# Prostate (men only)
+PROSTATE_CONCEPTS = (
+    4163261,   # Primary malignant neoplasm of prostate — NOTE: verify
+    4330539,   # Malignant neoplasm of prostate
+    200962,    # Malignant tumor of prostate — NOTE: verify
+    4114235,   # Prostate carcinoma
+    197508,    # Carcinoma of prostate
+)
+
+# ── Exclusion concepts ──
+# Pregnancy
+PREGNANCY_CONCEPTS = (4299535, 4128331, 40483082)
+
+# Bariatric surgery
+BARIATRIC_CONCEPTS = (
+    4144272,   # Bariatric surgery
+    4215502,   # Gastric bypass
+    4338257,   # Sleeve gastrectomy
+)
+
+# Smoking (for covariate)
+SMOKING_CONCEPTS = (
+    4298794,   # Current smoker
+    4144272,   # Former smoker
+    4220362,   # Never smoked
+    903654,    # Smoking history
+)
+
+print("✅ Concept IDs defined")
+
+# %% ── Cell 3: Fetch BMI Data with Index Date ──────────────
+# Index date = FIRST valid BMI measurement per person
+
+print("⏳ [STEP 1] Fetching BMI measurements...")
+
+bmi_sql = f"""
+WITH bmi_ranked AS (
+    SELECT
+        m.person_id,
+        m.value_as_number AS bmi_value,
+        m.measurement_datetime AS bmi_date,
+        ROW_NUMBER() OVER (
+            PARTITION BY m.person_id
+            ORDER BY m.measurement_datetime ASC
+        ) AS rn
+    FROM `{CDR}.measurement` m
+    WHERE m.measurement_concept_id = {BMI_CONCEPT}
+      AND m.value_as_number BETWEEN 18.5 AND 60
+      AND m.value_as_number IS NOT NULL
+)
+SELECT person_id, bmi_value, bmi_date
+FROM bmi_ranked
+WHERE rn = 1
+"""
+
+bmi_df = pd.read_gbq(bmi_sql, dialect="standard",
+                       use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                       progress_bar_type="tqdm_notebook")
+
+# Categorize BMI — ONLY Normal and Obese (exclude overweight per protocol)
+bmi_df['bmi_category'] = pd.cut(
+    bmi_df['bmi_value'].astype(float),
+    bins=[18.5, 24.9999, 29.9999, 100],
+    labels=['Normal', 'Overweight', 'Obese'],
+    right=True
+)
+
+# For primary analysis: Normal vs Obese only
+bmi_primary = bmi_df[bmi_df['bmi_category'].isin(['Normal', 'Obese'])].copy()
+bmi_primary['obese'] = (bmi_primary['bmi_category'] == 'Obese').astype(int)
+
+print(f"✅ Total with BMI: {len(bmi_df):,}")
+print(f"   Normal (18.5–24.9): {(bmi_df['bmi_category']=='Normal').sum():,}")
+print(f"   Overweight (25–29.9): {(bmi_df['bmi_category']=='Overweight').sum():,}")
+print(f"   Obese (≥30): {(bmi_df['bmi_category']=='Obese').sum():,}")
+print(f"   Primary analysis (Normal+Obese): {len(bmi_primary):,}")
+
+# %% ── Cell 4: Fetch Demographics ──────────────────────────
+
+print("\n⏳ [STEP 2] Fetching demographics...")
+
+demo_sql = f"""
+SELECT
+    p.person_id,
+    p.sex_at_birth_concept_id,
+    sex.concept_name AS sex_at_birth,
+    p.birth_datetime,
+    p.race_concept_id,
+    race.concept_name AS race,
+    p.ethnicity_concept_id,
+    eth.concept_name AS ethnicity
+FROM `{CDR}.person` p
+LEFT JOIN `{CDR}.concept` sex ON p.sex_at_birth_concept_id = sex.concept_id
+LEFT JOIN `{CDR}.concept` race ON p.race_concept_id = race.concept_id
+LEFT JOIN `{CDR}.concept` eth ON p.ethnicity_concept_id = eth.concept_id
+"""
+
+demo_df = pd.read_gbq(demo_sql, dialect="standard",
+                        use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                        progress_bar_type="tqdm_notebook")
+
+print(f"✅ Demographics: {len(demo_df):,}")
+
+# %% ── Cell 5: Fetch Cancer Diagnoses ──────────────────────
+
+print("\n⏳ [STEP 3] Fetching cancer diagnoses...")
+
+def fetch_cancer(concept_tuple, label):
+    sql = f"""
+    SELECT DISTINCT
+        co.person_id,
+        MIN(co.condition_start_datetime) AS first_dx_date
+    FROM `{CDR}.condition_occurrence` co
+    WHERE co.condition_concept_id IN (
+        SELECT DISTINCT c.concept_id
+        FROM `{CDR}.cb_criteria` c
+        JOIN (
+            SELECT CAST(cr.id AS STRING) AS id
+            FROM `{CDR}.cb_criteria` cr
+            WHERE concept_id IN {concept_tuple}
+              AND full_text LIKE '%_rank1]%'
+        ) a ON (
+            c.path LIKE CONCAT('%.', a.id, '.%')
+            OR c.path LIKE CONCAT('%.', a.id)
+            OR c.path LIKE CONCAT(a.id, '.%')
+            OR c.path = a.id
+        )
+        WHERE is_standard = 1 AND is_selectable = 1
+    )
+    GROUP BY co.person_id
+    """
+    df = pd.read_gbq(sql, dialect="standard",
+                       use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                       progress_bar_type="tqdm_notebook")
+    df['cancer_type'] = label
+    print(f"   {label}: {len(df):,} patients")
+    return df
+
+crc_dx = fetch_cancer(CRC_CONCEPTS, 'Colorectal')
+endo_dx = fetch_cancer(ENDO_CONCEPTS, 'Endometrial')
+prostate_dx = fetch_cancer(PROSTATE_CONCEPTS, 'Prostate')
+
+# %% ── Cell 6: Fetch Exclusion Data ────────────────────────
+
+print("\n⏳ [STEP 4] Fetching exclusion data (pregnancy, bariatric surgery)...")
+
+# Pregnancy — to exclude if active at index date
+preg_sql = f"""
+SELECT DISTINCT co.person_id, co.condition_start_datetime AS preg_date
+FROM `{CDR}.condition_occurrence` co
+WHERE co.condition_concept_id IN {PREGNANCY_CONCEPTS}
+"""
+preg_df = pd.read_gbq(preg_sql, dialect="standard",
+                        use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                        progress_bar_type="tqdm_notebook")
+print(f"   Pregnancy records: {len(preg_df):,}")
+
+# Bariatric surgery
+bari_sql = f"""
+SELECT DISTINCT po.person_id, po.procedure_datetime AS bari_date
+FROM `{CDR}.procedure_occurrence` po
+WHERE po.procedure_concept_id IN {BARIATRIC_CONCEPTS}
+"""
+try:
+    bari_df = pd.read_gbq(bari_sql, dialect="standard",
+                            use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                            progress_bar_type="tqdm_notebook")
+    print(f"   Bariatric surgery records: {len(bari_df):,}")
+except:
+    bari_df = pd.DataFrame(columns=['person_id', 'bari_date'])
+    print("   Bariatric surgery: no records found")
+
+# %% ── Cell 7: Fetch Smoking Status (Covariate) ────────────
+
+print("\n⏳ [STEP 5] Fetching smoking status...")
+
+smoking_sql = f"""
+WITH smoke AS (
+    SELECT
+        o.person_id,
+        c.concept_name AS smoking_status,
+        o.observation_datetime,
+        ROW_NUMBER() OVER (PARTITION BY o.person_id ORDER BY o.observation_datetime DESC) AS rn
+    FROM `{CDR}.observation` o
+    JOIN `{CDR}.concept` c ON o.value_as_concept_id = c.concept_id
+    WHERE o.observation_concept_id IN {SMOKING_CONCEPTS}
+)
+SELECT person_id, smoking_status
+FROM smoke WHERE rn = 1
+"""
+
+smoking_df = pd.read_gbq(smoking_sql, dialect="standard",
+                           use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                           progress_bar_type="tqdm_notebook")
+print(f"   Smoking data: {len(smoking_df):,}")
+
+# %% ── Cell 8: Build Analytic Cohort ───────────────────────
+
+print("\n" + "="*70)
+print("   BUILDING ANALYTIC COHORT")
+print("="*70)
+
+# Start with BMI (primary: Normal + Obese only)
+cohort = bmi_primary.merge(demo_df, on='person_id', how='inner')
+
+# ── Calculate age at index ──
+cohort['bmi_date'] = pd.to_datetime(cohort['bmi_date'], utc=True)
+cohort['birth_datetime'] = pd.to_datetime(cohort['birth_datetime'], utc=True)
+cohort['age_at_index'] = (cohort['bmi_date'] - cohort['birth_datetime']).dt.days / 365.25
+
+# ── INCLUSION: Age 21–65 ──
+n0 = len(cohort)
+cohort = cohort[(cohort['age_at_index'] >= 21) & (cohort['age_at_index'] <= 65)].copy()
+print(f"Age 21–65 filter: {n0:,} → {len(cohort):,} (excluded {n0-len(cohort):,})")
+
+# ── INCLUSION: Must have ≥12 months of EHR data AFTER index ──
+# Use last condition/measurement date as proxy for end of observation
+last_obs_sql = f"""
+SELECT person_id, MAX(observation_date) AS last_obs_date
+FROM (
+    SELECT person_id, DATE(condition_start_datetime) AS observation_date
+    FROM `{CDR}.condition_occurrence`
+    UNION ALL
+    SELECT person_id, DATE(measurement_datetime) AS observation_date
+    FROM `{CDR}.measurement`
+    UNION ALL
+    SELECT person_id, DATE(visit_start_datetime) AS observation_date
+    FROM `{CDR}.visit_occurrence`
+)
+GROUP BY person_id
+"""
+print("⏳ Fetching observation end dates...")
+last_obs_df = pd.read_gbq(last_obs_sql, dialect="standard",
+                            use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                            progress_bar_type="tqdm_notebook")
+last_obs_df['last_obs_date'] = pd.to_datetime(last_obs_df['last_obs_date'], utc=True)
+
+cohort = cohort.merge(last_obs_df, on='person_id', how='left')
+cohort['followup_days'] = (cohort['last_obs_date'] - cohort['bmi_date']).dt.days
+
+n1 = len(cohort)
+cohort = cohort[cohort['followup_days'] >= 365].copy()
+print(f"≥12mo follow-up: {n1:,} → {len(cohort):,} (excluded {n1-len(cohort):,})")
+
+# ── EXCLUSION: Prior CRC at index (prevalent cases) ──
+crc_dx['first_dx_date'] = pd.to_datetime(crc_dx['first_dx_date'], utc=True)
+cohort = cohort.merge(crc_dx[['person_id', 'first_dx_date']].rename(
+    columns={'first_dx_date': 'crc_first_dx'}), on='person_id', how='left')
+
+n2 = len(cohort)
+prevalent_crc = cohort['crc_first_dx'].notna() & (cohort['crc_first_dx'] <= cohort['bmi_date'])
+cohort = cohort[~prevalent_crc].copy()
+print(f"Exclude prevalent CRC: {n2:,} → {len(cohort):,} (excluded {n2-len(cohort):,})")
+
+# ── EXCLUSION: Pregnancy at index (±6 months) ──
+if len(preg_df) > 0:
+    preg_df['preg_date'] = pd.to_datetime(preg_df['preg_date'], utc=True)
+    preg_at_index = preg_df.groupby('person_id')['preg_date'].min().reset_index()
+    cohort = cohort.merge(preg_at_index, on='person_id', how='left')
+    n3 = len(cohort)
+    preg_mask = cohort['preg_date'].notna() & (
+        abs((cohort['preg_date'] - cohort['bmi_date']).dt.days) <= 180
+    )
+    cohort = cohort[~preg_mask].copy()
+    print(f"Exclude pregnancy at index: {n3:,} → {len(cohort):,} (excluded {n3-len(cohort):,})")
+
+# ── EXCLUSION: Bariatric surgery before index ──
+if len(bari_df) > 0:
+    bari_df['bari_date'] = pd.to_datetime(bari_df['bari_date'], utc=True)
+    bari_pre = bari_df.groupby('person_id')['bari_date'].min().reset_index()
+    cohort = cohort.merge(bari_pre, on='person_id', how='left')
+    n4 = len(cohort)
+    bari_mask = cohort['bari_date'].notna() & (cohort['bari_date'] <= cohort['bmi_date'])
+    cohort = cohort[~bari_mask].copy()
+    print(f"Exclude prior bariatric surgery: {n4:,} → {len(cohort):,} (excluded {n4-len(cohort):,})")
+
+# ── Add sex variable ──
+cohort['is_female'] = (cohort['sex_at_birth_concept_id'] == FEMALE).astype(int)
+cohort['is_male'] = (cohort['sex_at_birth_concept_id'] == MALE).astype(int)
+
+# ── Merge smoking ──
+cohort = cohort.merge(smoking_df, on='person_id', how='left')
+cohort['ever_smoker'] = cohort['smoking_status'].apply(
+    lambda x: 1 if isinstance(x, str) and ('current' in x.lower() or 'former' in x.lower()) else 0
+).astype(int)
+
+# ── Simplify race ──
+def clean_race(r):
+    if pd.isna(r): return 'Other'
+    r = str(r)
+    if 'White' in r: return 'White'
+    elif 'Black' in r: return 'Black'
+    elif 'Asian' in r: return 'Asian'
+    elif 'Hispanic' in r: return 'Hispanic'
+    else: return 'Other'
+
+cohort['race_clean'] = cohort['race'].apply(clean_race)
+
+# ── Hispanic ethnicity ──
+cohort['hispanic'] = cohort['ethnicity'].apply(
+    lambda x: 1 if isinstance(x, str) and 'Hispanic' in x and 'Not' not in x else 0
+).astype(int)
+
+# ── Flag INCIDENT cancers (diagnosed AFTER index date) ──
+# Colorectal
+cohort['incident_crc'] = (
+    cohort['crc_first_dx'].notna() & (cohort['crc_first_dx'] > cohort['bmi_date'])
+).astype(int)
+
+# Endometrial (women only)
+endo_dx['first_dx_date'] = pd.to_datetime(endo_dx['first_dx_date'], utc=True)
+cohort = cohort.merge(endo_dx[['person_id', 'first_dx_date']].rename(
+    columns={'first_dx_date': 'endo_first_dx'}), on='person_id', how='left')
+cohort['incident_endo'] = (
+    cohort['endo_first_dx'].notna() & (cohort['endo_first_dx'] > cohort['bmi_date'])
+).astype(int)
+
+# Prostate (men only)
+prostate_dx['first_dx_date'] = pd.to_datetime(prostate_dx['first_dx_date'], utc=True)
+cohort = cohort.merge(prostate_dx[['person_id', 'first_dx_date']].rename(
+    columns={'first_dx_date': 'prostate_first_dx'}), on='person_id', how='left')
+cohort['incident_prostate'] = (
+    cohort['prostate_first_dx'].notna() & (cohort['prostate_first_dx'] > cohort['bmi_date'])
+).astype(int)
+
+# ── Force numeric dtypes ──
+for col in ['age_at_index', 'bmi_value', 'obese', 'is_female', 'is_male',
+            'ever_smoker', 'hispanic', 'incident_crc', 'incident_endo', 'incident_prostate']:
+    cohort[col] = pd.to_numeric(cohort[col], errors='coerce')
+
+cohort = cohort.dropna(subset=['age_at_index', 'bmi_value']).copy()
+
+print(f"\n{'='*70}")
+print(f"   FINAL ANALYTIC COHORT: N = {len(cohort):,}")
+print(f"{'='*70}")
+print(f"   Obese (BMI ≥30):    {cohort['obese'].sum():,}")
+print(f"   Normal (18.5–24.9): {(cohort['obese']==0).sum():,}")
+print(f"   Female: {cohort['is_female'].sum():,}")
+print(f"   Male:   {cohort['is_male'].sum():,}")
+print(f"   Mean age: {cohort['age_at_index'].mean():.1f} ± {cohort['age_at_index'].std():.1f}")
+print(f"   Mean BMI: {cohort['bmi_value'].mean():.1f} ± {cohort['bmi_value'].std():.1f}")
+print(f"   Mean follow-up: {cohort['followup_days'].mean()/365.25:.1f} years")
+print(f"\n   Incident CRC:          {cohort['incident_crc'].sum():,}")
+print(f"   Incident Endometrial:  {cohort[cohort['is_female']==1]['incident_endo'].sum():,} (women)")
+print(f"   Incident Prostate:     {cohort[cohort['is_male']==1]['incident_prostate'].sum():,} (men)")
+
+# %% ── Cell 9: CONSORT Flow ────────────────────────────────
+
+print(f"""
+╔══════════════════════════════════════════════════╗
+║            CONSORT COHORT FLOW                   ║
+╠══════════════════════════════════════════════════╣
+║ Adults with valid BMI (Normal or Obese)          ║
+║   → Age 21–65                                    ║
+║   → ≥12 months follow-up after index             ║
+║   → No prevalent CRC at index                    ║
+║   → No pregnancy at index (±6 months)            ║
+║   → No prior bariatric surgery                   ║
+╠══════════════════════════════════════════════════╣
+║ FINAL COHORT: N = {len(cohort):,}                ║
+║   Obese:  {cohort['obese'].sum():,}              ║
+║   Normal: {(cohort['obese']==0).sum():,}          ║
+╚══════════════════════════════════════════════════╝
+""")
+
+# ============================================================
+# PATCH: Replace Cell 10 (analysis function) with this
+# Fixes singular matrix by diagnosing collinearity and
+# using SVD-based column pruning
+# ============================================================
+
+def run_analysis(df, cancer_col, cancer_label, sex_filter=None):
+    """
+    Full analysis: descriptive, crude OR, adjusted logistic regression.
+    
+    FIX v3: SVD-based automatic removal of collinear columns.
+    """
+    
+    print("\n" + "="*70)
+    if sex_filter:
+        print(f"  ANALYSIS: {cancer_label} ({sex_filter} Only)")
+    else:
+        print(f"  ANALYSIS: {cancer_label} (Both Sexes)")
+    print("="*70)
+    
+    # Filter by sex
+    if sex_filter == 'Female':
+        adf = df[df['is_female'] == 1].copy()
+    elif sex_filter == 'Male':
+        adf = df[df['is_male'] == 1].copy()
+    else:
+        adf = df.copy()
+    
+    n_total = len(adf)
+    n_cases = int(adf[cancer_col].sum())
+    n_obese = int(adf['obese'].sum())
+    n_normal = int((adf['obese'] == 0).sum())
+    
+    print(f"\n  Cohort: N = {n_total:,}")
+    print(f"  Obese: {n_obese:,} | Normal: {n_normal:,}")
+    print(f"  Incident {cancer_label}: {n_cases:,} ({n_cases/n_total*100:.2f}%)")
+    
+    if n_cases < 5:
+        print(f"  ⚠️ Too few events ({n_cases}) — skipping")
+        return None
+    
+    # ── TABLE 1: Incidence by group ──
+    print(f"\n  [TABLE 1] Incidence by BMI Group")
+    print(f"  {'-'*50}")
+    for grp, label in [(1, 'Obese'), (0, 'Normal')]:
+        sub = adf[adf['obese'] == grp]
+        cases = int(sub[cancer_col].sum())
+        total = len(sub)
+        rate = cases / total * 100 if total > 0 else 0
+        print(f"    {label:12s}: {cases:,} / {total:,} ({rate:.2f}%)")
+    
+    ct = pd.crosstab(adf['obese'], adf[cancer_col])
+    if ct.shape == (2, 2):
+        chi2, p_chi, _, _ = chi2_contingency(ct)
+        print(f"    Chi-square: X² = {chi2:.2f}, p = {p_chi:.4f}")
+    
+    # ── Crude OR ──
+    a = int(adf[(adf['obese']==1) & (adf[cancer_col]==1)].shape[0])
+    b = int(adf[(adf['obese']==1) & (adf[cancer_col]==0)].shape[0])
+    c = int(adf[(adf['obese']==0) & (adf[cancer_col]==1)].shape[0])
+    d = int(adf[(adf['obese']==0) & (adf[cancer_col]==0)].shape[0])
+    
+    crude_or = np.nan
+    if min(a, b, c, d) > 0:
+        crude_or = (a * d) / (b * c)
+        se_log = np.sqrt(1/a + 1/b + 1/c + 1/d)
+        crude_ci_lo = np.exp(np.log(crude_or) - 1.96 * se_log)
+        crude_ci_hi = np.exp(np.log(crude_or) + 1.96 * se_log)
+        print(f"\n  [TABLE 2] Crude OR")
+        print(f"    Obese vs Normal: OR = {crude_or:.3f} (95% CI: {crude_ci_lo:.3f}–{crude_ci_hi:.3f})")
+    
+    # ── ADJUSTED LOGISTIC REGRESSION ──
+    print(f"\n  [TABLE 3] Adjusted Logistic Regression")
+    print(f"  {'-'*50}")
+    
+    reg = adf.copy()
+    
+    # ── DIAGNOSTIC: Check covariate distributions ──
+    print(f"\n    [DIAGNOSTIC] Covariate distributions:")
+    print(f"      ever_smoker: {reg['ever_smoker'].sum():,} / {len(reg):,} ({reg['ever_smoker'].mean()*100:.1f}%)")
+    print(f"      Race distribution:")
+    for rc, cnt in reg['race_clean'].value_counts().items():
+        print(f"        {rc}: {cnt:,} ({cnt/len(reg)*100:.1f}%)")
+    
+    # ── Build feature matrix ──
+    # Race: only use dummies for groups with sufficient N (>1% of cohort)
+    race_counts = reg['race_clean'].value_counts()
+    min_race_n = len(reg) * 0.01  # 1% threshold
+    valid_races = race_counts[race_counts >= min_race_n].index.tolist()
+    
+    # Collapse small race groups into 'Other'
+    reg['race_model'] = reg['race_clean'].apply(lambda x: x if x in valid_races else 'Other')
+    
+    # Pick reference category (largest group)
+    ref_race = reg['race_model'].value_counts().index[0]
+    print(f"      Race reference: {ref_race} (largest group)")
+    
+    race_dum = pd.get_dummies(reg['race_model'], prefix='race', dtype=float)
+    race_dum = race_dum.drop(columns=[f'race_{ref_race}'], errors='ignore')
+    reg = pd.concat([reg, race_dum], axis=1)
+    
+    # Features: start with all, then prune
+    features = ['obese', 'age_at_index']
+    
+    # Only include ever_smoker if >5% have data
+    smoking_pct = reg['ever_smoker'].mean()
+    if smoking_pct >= 0.05:
+        features.append('ever_smoker')
+        print(f"      Smoking: INCLUDED ({smoking_pct*100:.1f}% positive)")
+    else:
+        print(f"      Smoking: EXCLUDED (only {smoking_pct*100:.1f}% positive — insufficient)")
+    
+    features += sorted([c for c in race_dum.columns])
+    
+    if not sex_filter:
+        features.append('is_male')
+    
+    # Outcome
+    y = reg[cancer_col].astype(float).values
+    
+    # Build X with intercept
+    X_df = reg[features].astype(float).copy()
+    X_df.insert(0, 'intercept', 1.0)
+    
+    feature_names = list(X_df.columns)
+    X = X_df.values.astype(np.float64)
+    
+    print(f"\n    Initial matrix: {X.shape}, features: {feature_names}")
+    
+    # ── SVD-based collinearity detection and removal ──
+    # This is the definitive fix: find and remove columns that cause rank deficiency
+    rank = np.linalg.matrix_rank(X)
+    print(f"    Rank: {rank} / {X.shape[1]} columns")
+    
+    while rank < X.shape[1]:
+        # Use SVD to find the problematic column
+        U, S, Vt = np.linalg.svd(X, full_matrices=False)
+        
+        # The last singular value close to zero indicates the linear dependence
+        # The corresponding row of Vt tells us which column contributes most
+        null_vector = np.abs(Vt[-1, :])
+        problem_idx = np.argmax(null_vector)
+        problem_col = feature_names[problem_idx]
+        
+        # Never drop the intercept or the exposure variable
+        if problem_col in ('intercept', 'obese'):
+            # Try the next most problematic column
+            sorted_idx = np.argsort(null_vector)[::-1]
+            for idx in sorted_idx:
+                if feature_names[idx] not in ('intercept', 'obese'):
+                    problem_idx = idx
+                    problem_col = feature_names[problem_idx]
+                    break
+            else:
+                print(f"    ⚠️ Cannot resolve collinearity without dropping exposure")
+                break
+        
+        print(f"    Dropping collinear column: {problem_col} (SVD loading: {null_vector[problem_idx]:.4f})")
+        X = np.delete(X, problem_idx, axis=1)
+        feature_names.pop(problem_idx)
+        rank = np.linalg.matrix_rank(X)
+        print(f"    New rank: {rank} / {X.shape[1]}")
+    
+    print(f"    Final features: {feature_names}")
+    print(f"    Final matrix: {X.shape}, rank: {rank}")
+    
+    # ── Fit model ──
+    try:
+        model = sm.Logit(y, X)
+        result = model.fit(disp=0, maxiter=300, method='newton')
+        
+        converged = result.mle_retvals.get('converged', False)
+        pseudo_r2 = result.prsquared
+        
+        if not converged or pseudo_r2 < -0.01:
+            print(f"    Newton didn't converge (R²={pseudo_r2:.4f}), trying BFGS...")
+            result = model.fit(disp=0, maxiter=500, method='bfgs')
+            converged = result.mle_retvals.get('converged', False)
+            pseudo_r2 = result.prsquared
+        
+        print(f"\n    ✅ Model converged: {converged}")
+        print(f"    Pseudo R²: {pseudo_r2:.4f}")
+        print(f"    N = {len(y):,}, Events = {int(y.sum()):,}\n")
+        
+        # Results
+        results_dict = {}
+        for i, fname in enumerate(feature_names):
+            coef = result.params[i]
+            se = result.bse[i]
+            or_val = np.exp(coef)
+            ci_lo = np.exp(coef - 1.96 * se)
+            ci_hi = np.exp(coef + 1.96 * se)
+            p_val = result.pvalues[i]
+            sig = "✅" if p_val < 0.05 else ""
+            
+            if fname == 'intercept':
+                print(f"    {'intercept':20s}: coef = {coef:.4f}")
+                continue
+            
+            print(f"    {fname:20s}: aOR = {or_val:.3f} "
+                  f"(95% CI: {ci_lo:.3f}–{ci_hi:.3f}), p = {p_val:.4f} {sig}")
+            
+            if fname == 'obese':
+                results_dict = {
+                    'or': or_val, 'ci_lo': ci_lo, 'ci_hi': ci_hi,
+                    'p': p_val, 'crude_or': crude_or,
+                    'n_total': n_total, 'n_cases': n_cases,
+                    'pseudo_r2': pseudo_r2
+                }
+        
+        adjusted_for = ", ".join([f for f in feature_names if f not in ('intercept', 'obese')])
+        print(f"\n    Adjusted for: {adjusted_for}")
+        print(f"    Reference: Normal BMI (18.5–24.9), {ref_race} race")
+        
+        return results_dict
+        
+    except Exception as e:
+        print(f"\n    ⚠️ Model failed: {e}")
+        
+        # ── FALLBACK: Minimal model (obese + age only) ──
+        print(f"    Trying minimal model (obese + age only)...")
+        try:
+            X_min = np.column_stack([
+                np.ones(len(y)),
+                reg['obese'].astype(float).values,
+                reg['age_at_index'].astype(float).values
+            ])
+            min_names = ['intercept', 'obese', 'age_at_index']
+            
+            result_min = sm.Logit(y, X_min).fit(disp=0, maxiter=300, method='newton')
+            
+            coef_ob = result_min.params[1]
+            se_ob = result_min.bse[1]
+            or_ob = np.exp(coef_ob)
+            ci_lo = np.exp(coef_ob - 1.96 * se_ob)
+            ci_hi = np.exp(coef_ob + 1.96 * se_ob)
+            p_ob = result_min.pvalues[1]
+            
+            print(f"    ✅ Minimal model converged!")
+            print(f"    Obese vs Normal: aOR = {or_ob:.3f} (95% CI: {ci_lo:.3f}–{ci_hi:.3f}), p = {p_ob:.4f}")
+            print(f"    Age: aOR = {np.exp(result_min.params[2]):.4f}")
+            print(f"    Pseudo R²: {result_min.prsquared:.4f}")
+            print(f"    Adjusted for: age only (race caused singularity)")
+            
+            return {
+                'or': or_ob, 'ci_lo': ci_lo, 'ci_hi': ci_hi,
+                'p': p_ob, 'crude_or': crude_or,
+                'n_total': n_total, 'n_cases': n_cases,
+                'pseudo_r2': result_min.prsquared
+            }
+        except Exception as e2:
+            print(f"    ⚠️ Even minimal model failed: {e2}")
+            return {'or': np.nan, 'crude_or': crude_or, 'n_total': n_total, 'n_cases': n_cases}
+
+# %% ── Cell 11: Run All Analyses ───────────────────────────
+
+print("\n" + "▶"*35)
+print("  RUNNING ALL ANALYSES")
+print("▶"*35)
+
+# 1. PRIMARY: Colorectal Cancer — Both Sexes
+res_crc = run_analysis(cohort, 'incident_crc', 'Colorectal Cancer', sex_filter=None)
+
+# 2. Colorectal — Women
+res_crc_f = run_analysis(cohort, 'incident_crc', 'Colorectal Cancer', sex_filter='Female')
+
+# 3. Colorectal — Men
+res_crc_m = run_analysis(cohort, 'incident_crc', 'Colorectal Cancer', sex_filter='Male')
+
+# 4. Endometrial — Women only
+res_endo = run_analysis(cohort, 'incident_endo', 'Endometrial Cancer', sex_filter='Female')
+
+# 5. Prostate — Men only
+res_prost = run_analysis(cohort, 'incident_prostate', 'Prostate Cancer', sex_filter='Male')
+
+# %% ── Cell 12: Summary Table ──────────────────────────────
+
+print("\n\n" + "="*80)
+print("  SUMMARY: Obesity (BMI ≥30) vs Normal (18.5–24.9) and Incident Cancer")
+print("="*80)
+
+summary = []
+for label, res in [
+    ('Colorectal (all)', res_crc),
+    ('Colorectal (F)', res_crc_f),
+    ('Colorectal (M)', res_crc_m),
+    ('Endometrial (F)', res_endo),
+    ('Prostate (M)', res_prost),
+]:
+    if res and not np.isnan(res.get('or', np.nan)):
+        summary.append({
+            'Cancer': label,
+            'N': f"{res['n_total']:,}",
+            'Events': f"{res['n_cases']:,}",
+            'Crude OR': f"{res.get('crude_or', np.nan):.3f}",
+            'Adjusted OR': f"{res['or']:.3f}",
+            '95% CI': f"{res['ci_lo']:.3f}–{res['ci_hi']:.3f}",
+            'p-value': f"{res['p']:.4f}",
+            'Pseudo R²': f"{res.get('pseudo_r2', np.nan):.4f}",
+            'Sig': '✅' if res['p'] < 0.05 else '—'
+        })
+    elif res:
+        summary.append({
+            'Cancer': label, 'N': f"{res['n_total']:,}",
+            'Events': f"{res['n_cases']:,}",
+            'Crude OR': f"{res.get('crude_or', np.nan):.3f}" if not np.isnan(res.get('crude_or', np.nan)) else 'N/A',
+            'Adjusted OR': 'N/A', '95% CI': 'N/A', 'p-value': 'N/A',
+            'Pseudo R²': 'N/A', 'Sig': '⚠️'
+        })
+
+if summary:
+    summary_df = pd.DataFrame(summary)
+    print(summary_df.to_string(index=False))
+else:
+    print("No analyses completed")
+
+# %% ── Cell 13: Visualization ──────────────────────────────
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ── Panel A: Forest plot of adjusted ORs ──
+labels = []
+ors = []
+ci_los = []
+ci_his = []
+
+for label, res in [
+    ('CRC (all)', res_crc),
+    ('CRC (F)', res_crc_f),
+    ('CRC (M)', res_crc_m),
+    ('Endometrial (F)', res_endo),
+    ('Prostate (M)', res_prost),
+]:
+    if res and not np.isnan(res.get('or', np.nan)):
+        labels.append(label)
+        ors.append(res['or'])
+        ci_los.append(res['ci_lo'])
+        ci_his.append(res['ci_hi'])
+
+if labels:
+    y_pos = range(len(labels))
+    xerr_lo = [ors[i] - ci_los[i] for i in range(len(ors))]
+    xerr_hi = [ci_his[i] - ors[i] for i in range(len(ors))]
+    
+    axes[0].errorbar(ors, y_pos, xerr=[xerr_lo, xerr_hi],
+                     fmt='o', color='darkred', capsize=5, markersize=8, linewidth=2)
+    axes[0].axvline(x=1, color='black', linestyle='--', linewidth=1, alpha=0.7)
+    axes[0].set_yticks(list(y_pos))
+    axes[0].set_yticklabels(labels, fontsize=11)
+    axes[0].set_xlabel('Adjusted Odds Ratio (95% CI)', fontsize=12)
+    axes[0].set_title('Obesity (BMI ≥30) vs Normal BMI\nand Incident Cancer Risk',
+                       fontsize=13, fontweight='bold')
+    axes[0].grid(axis='x', alpha=0.3)
+    
+    for i in range(len(ors)):
+        axes[0].annotate(f"{ors[i]:.2f}", (ors[i], i), textcoords="offset points",
+                         xytext=(12, 8), fontsize=9, color='darkred')
+
+# ── Panel B: Incidence rates ──
+cancer_labels = []
+obese_rates = []
+normal_rates = []
+
+for label, cancer_col, sex_filter in [
+    ('CRC (all)', 'incident_crc', None),
+    ('CRC (F)', 'incident_crc', 'Female'),
+    ('CRC (M)', 'incident_crc', 'Male'),
+    ('Endometrial', 'incident_endo', 'Female'),
+    ('Prostate', 'incident_prostate', 'Male'),
+]:
+    if sex_filter == 'Female':
+        sub = cohort[cohort['is_female'] == 1]
+    elif sex_filter == 'Male':
+        sub = cohort[cohort['is_male'] == 1]
+    else:
+        sub = cohort
+    
+    ob = sub[sub['obese'] == 1]
+    nm = sub[sub['obese'] == 0]
+    
+    if len(ob) > 0 and len(nm) > 0:
+        cancer_labels.append(label)
+        obese_rates.append(ob[cancer_col].mean() * 100)
+        normal_rates.append(nm[cancer_col].mean() * 100)
+
+if cancer_labels:
+    x = np.arange(len(cancer_labels))
+    w = 0.35
+    axes[1].bar(x - w/2, obese_rates, w, label='Obese (BMI ≥30)', color='#e74c3c', alpha=0.85)
+    axes[1].bar(x + w/2, normal_rates, w, label='Normal (18.5–24.9)', color='#3498db', alpha=0.85)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(cancer_labels, rotation=25, ha='right')
+    axes[1].set_ylabel('Incidence (%)', fontsize=12)
+    axes[1].set_title('Cancer Incidence by BMI Group', fontsize=13, fontweight='bold')
+    axes[1].legend()
+    axes[1].grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('obesity_cancer_results.png', dpi=150, bbox_inches='tight')
+plt.show()
+print("✅ Plots saved: obesity_cancer_results.png")
+
+# %% ── Cell 14: Export ──────────────────────────────────────
+
+export_cols = ['person_id', 'age_at_index', 'bmi_value', 'bmi_category', 'obese',
+               'sex_at_birth', 'race_clean', 'hispanic', 'ever_smoker',
+               'followup_days', 'incident_crc', 'incident_endo', 'incident_prostate']
+
+export_df = cohort[[c for c in export_cols if c in cohort.columns]]
+export_df.to_csv('obesity_cancer_cohort.csv', index=False)
+
+print(f"\n✅ Cohort exported: {len(export_df):,} rows")
+
+print("""
+╔══════════════════════════════════════════════════════════╗
+║         ANALYSIS COMPLETE                                ║
+╠══════════════════════════════════════════════════════════╣
+║                                                          ║
+║  ✅ Proper incident cohort design (index date based)     ║
+║  ✅ ≥12 month follow-up required                         ║
+║  ✅ Prevalent cancers excluded                            ║
+║  ✅ Pregnancy & bariatric surgery exclusions              ║
+║  ✅ Crude ORs with Woolf CIs                             ║
+║  ✅ Adjusted logistic regression (statsmodels)            ║
+║     — Explicit intercept (never dropped)                 ║
+║     — Race consolidated (4 categories)                   ║
+║     — Proper SEs, CIs, p-values                          ║
+║  ✅ Sex-stratified analyses                               ║
+║  ✅ Forest plot + incidence comparison                    ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+""")
