@@ -474,7 +474,7 @@ back_pain_baseline AS (
   GROUP BY b.person_id, b.index_date
 ),
 
-final_cohort AS (
+final_cohort_internal AS (
   SELECT
     b.person_id,
     b.exposure_group,
@@ -544,6 +544,48 @@ final_cohort AS (
     ON dex.person_id = b.person_id
   WHERE dex.person_id IS NULL
     AND sd.spine_dx_on_or_before_index IS NULL
+),
+
+final_cohort AS (
+  SELECT
+    CAST(FARM_FINGERPRINT(CAST(person_id AS STRING)) AS INT64) AS person_id,
+    exposure_group,
+    index_date,
+    observation_period_start_date,
+    observation_period_end_date,
+    days_followup,
+    has_min_followup_2y,
+    birth_date,
+    age_at_index,
+    sex_at_birth,
+    race,
+    ethnicity,
+    diabetes_duration_days,
+    bmi,
+    bmi_present,
+    obese_bmi30,
+    hba1c_recent,
+    hba1c_mean_year,
+    hba1c_measurements_baseline,
+    insulin_use_baseline,
+    neuropathy_baseline,
+    nephropathy_baseline,
+    retinopathy_baseline,
+    baseline_condition_count,
+    baseline_outpatient_visits,
+    followup_outpatient_visits_2y,
+    baseline_endocrinology_visits,
+    baseline_orthopedics_visits,
+    baseline_spine_imaging,
+    followup_spine_imaging_2y,
+    baseline_back_pain_flag,
+    first_spine_dx_after_index,
+    first_spine_dx_2y,
+    incident_spine_2y,
+    event_full_followup,
+    time_to_event_or_censor_days,
+    person_time_2y_days
+  FROM final_cohort_internal
 )
 """
 
@@ -601,12 +643,12 @@ def build_post_index_bmi_sql(dataset: str) -> str:
         _core_ctes(dataset)
         + """
 SELECT
-  fc.person_id,
+  CAST(FARM_FINGERPRINT(CAST(fc.person_id AS STRING)) AS INT64) AS person_id,
   fc.exposure_group,
   fc.index_date,
   m.measurement_date,
   m.value_as_number AS bmi
-FROM final_cohort fc
+FROM final_cohort_internal fc
 JOIN `{dataset}.measurement` m
   ON m.person_id = fc.person_id
  AND m.measurement_concept_id IN UNNEST(@bmi_measurement_concept_ids)
