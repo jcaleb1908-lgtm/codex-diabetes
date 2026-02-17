@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 
 CHANGE_LOG = [
+    "2026-02-17: Second-pass tuning set overlap-first weighting defaults with ESS-floor candidate selection and tighter truncation options.",
+    "2026-02-17: Rebuilt PROJECT6_SPINE_ALL_IN_ONE.py as a true standalone monolith generated from the modular pipeline.",
     "2026-02-17: Added MI-first handling for BMI/HbA1c missingness with pooled PS/outcome estimates plus double-weighting sensitivity.",
     "2026-02-17: Added overlap/ATT/IPTW weighting selection by best post-weight balance and explicit extreme-weight diagnostics (max/p95/p99/ESS).",
     "2026-02-17: Added HbA1c unit/range normalization, winsorization guards, and Cox penalization defaults for sparse-event stability.",
@@ -137,12 +139,13 @@ CONFIG = {
     "mi_max_iter": 20,
     "mi_target_columns": ["bmi", "hba1c_recent", "hba1c_mean_year"],
     "missingness_weight_truncation_quantiles": (0.01, 0.99),
-    "ps_weighting_strategies": ["overlap", "iptw", "att"],
+    "ps_weighting_strategies": ["overlap"],
     "ps_stabilized_weights": True,
-    "ps_weight_truncation_options": [(0.01, 0.99), (0.005, 0.995)],
+    "ps_weight_truncation_options": [(0.01, 0.99), (0.005, 0.995), (0.02, 0.98)],
     "ps_weight_truncation_quantiles": (0.01, 0.99),
     "ps_balance_target_abs_smd": 0.10,
-    "ps_use_ml_if_available": False,
+    "ps_min_ess_ratio": 0.30,
+    "ps_use_ml_if_available": True,
     "ps_ml_n_estimators": 300,
     "ps_ml_learning_rate": 0.05,
     "ps_ml_subsample": 0.8,

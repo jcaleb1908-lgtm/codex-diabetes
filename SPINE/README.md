@@ -14,9 +14,8 @@ cd /Users/jcbn/Desktop/CODEX/SPINE
 python3 PROJECT6_SPINE_ALL_IN_ONE.py
 ```
 
-Note: the canonical implementation is now the modular package under `project6_spine_pipeline/`; use
-`run_project6_spine_pipeline.py` for current methods (MI-first missingness handling, overlap/double weighting, and
-updated diagnostics).
+`PROJECT6_SPINE_ALL_IN_ONE.py` is now a true standalone monolithic script (no package-relative imports) generated
+from the same modular source, so both entrypoints run the same MI-first and overlap/weight-diagnostics methodology.
 
 Required env:
 

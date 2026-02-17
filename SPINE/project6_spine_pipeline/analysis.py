@@ -2316,6 +2316,8 @@ def build_ps_and_outcomes(
             continue
 
         best: dict[str, object] | None = None
+        min_ess_ratio = float(config.get("ps_min_ess_ratio", 0.30))
+        min_ess = float(len(work)) * min_ess_ratio
         for ps_name, ps_pred in ps_candidates.items():
             ps_clean = pd.to_numeric(ps_pred, errors="coerce").clip(1e-4, 1 - 1e-4)
             for strategy in strategies:
@@ -2334,7 +2336,16 @@ def build_ps_and_outcomes(
                     if bal.empty:
                         continue
                     max_abs = float(pd.to_numeric(bal["abs_smd_weighted"], errors="coerce").max())
-                    if best is None or max_abs < float(best["max_abs_smd"]):
+                    ess = _effective_sample_size(w_treat)
+                    if not np.isfinite(ess) or ess < min_ess:
+                        continue
+                    if best is None or (
+                        max_abs < float(best["max_abs_smd"])
+                        or (
+                            np.isclose(max_abs, float(best["max_abs_smd"]))
+                            and ess > float(best["ess"])
+                        )
+                    ):
                         best = {
                             "ps_name": ps_name,
                             "strategy": strategy,
@@ -2342,9 +2353,44 @@ def build_ps_and_outcomes(
                             "ps": ps_clean,
                             "w_treat": w_treat,
                             "max_abs_smd": max_abs,
+                            "ess": ess,
                             "balance": bal,
                         }
 
+        if best is None:
+            notes.append(
+                f"Imputation {imp_idx}: no PS candidate met ESS floor ({min_ess_ratio:.2f}); relaxing to best SMD."
+            )
+            for ps_name, ps_pred in ps_candidates.items():
+                ps_clean = pd.to_numeric(ps_pred, errors="coerce").clip(1e-4, 1 - 1e-4)
+                for strategy in strategies:
+                    raw_w = _compute_treatment_weights(
+                        work["treat_glp1"],
+                        ps_clean,
+                        strategy=strategy,
+                        stabilized=bool(config.get("ps_stabilized_weights", True)),
+                    )
+                    for q_lo, q_hi in truncation_options:
+                        w_treat = _truncate_weights(raw_w, q_lo, q_hi)
+                        label = f"{ps_name}|{strategy}|q{q_lo:.3f}-{q_hi:.3f}"
+                        trial = work.copy()
+                        trial["w_treat"] = w_treat
+                        bal = _compute_balance_table(trial, weight_col="w_treat", weighting_label=label)
+                        if bal.empty:
+                            continue
+                        max_abs = float(pd.to_numeric(bal["abs_smd_weighted"], errors="coerce").max())
+                        ess = _effective_sample_size(w_treat)
+                        if best is None or max_abs < float(best["max_abs_smd"]):
+                            best = {
+                                "ps_name": ps_name,
+                                "strategy": strategy,
+                                "label": label,
+                                "ps": ps_clean,
+                                "w_treat": w_treat,
+                                "max_abs_smd": max_abs,
+                                "ess": ess,
+                                "balance": bal,
+                            }
         if best is None:
             continue
 
@@ -2359,6 +2405,7 @@ def build_ps_and_outcomes(
                 "strategy": best["strategy"],
                 "label": best["label"],
                 "max_abs_smd": float(best["max_abs_smd"]),
+                "ess": float(best["ess"]),
             }
 
         bal_primary = _compute_balance_table(work, weight_col="w_treat", weighting_label=f"{best['label']}|primary")
