@@ -2,6 +2,7 @@
 # This is a true single-file runner: it loads all pipeline modules in memory (no writing .py files).
 
 import importlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -62,6 +63,9 @@ from main import main as run_pipeline
 # Optional runtime overrides for notebook execution.
 USER_INPUT = {
     "workspace_cdr": "fc-aou-cdr-prod-ct.C2024Q3R8",
+    # IMPORTANT for AoU VPC-SC: this must be your workspace billing project
+    # (example: terra-vpc-sc-xxxxxxxx).
+    "bq_project": os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip(),
     "bq_location": "US",
     "temp_dataset": "",
     "output_dir": "./project6_outputs",
@@ -74,6 +78,8 @@ USER_INPUT = {
 
 if USER_INPUT.get("workspace_cdr") and "<PASTE" not in USER_INPUT["workspace_cdr"]:
     CONFIG["dataset"] = USER_INPUT["workspace_cdr"].strip()
+if USER_INPUT.get("bq_project"):
+    os.environ["GOOGLE_CLOUD_PROJECT"] = str(USER_INPUT["bq_project"]).strip()
 if USER_INPUT.get("bq_location"):
     CONFIG["bq_location"] = str(USER_INPUT["bq_location"]).strip()
 if USER_INPUT.get("temp_dataset"):
@@ -87,6 +93,44 @@ for _k, _v in USER_INPUT.get("concept_overrides", {}).items():
     if _v:
         CONCEPTS[_k] = _v
 
+# AoU compatibility patch:
+# 1) force explicit billing project on client construction
+# 2) avoid BigQuery Storage API path when reading query results
+import logging
+from google.cloud import bigquery
+import bq_utils as _bq_utils
+import cohort as _cohort
+import main as _main
+
+
+def _create_bq_client_aou(location: str = "US"):
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip() or None
+    return bigquery.Client(project=project, location=location)
+
+
+def _run_query_no_bqstorage(client, sql, params, *, job_name):
+    query_parameters = list(params) if params else []
+    job_config = bigquery.QueryJobConfig(query_parameters=query_parameters)
+    logging.info("Running query: %s", job_name)
+    try:
+        job = client.query(sql, job_config=job_config)
+        result = job.result()
+        try:
+            df = result.to_dataframe(create_bqstorage_client=False)
+        except TypeError:
+            df = result.to_dataframe()
+        logging.info("Finished query: %s | rows=%s", job_name, len(df))
+        return df
+    except (_bq_utils.BadRequest, _bq_utils.Forbidden, _bq_utils.NotFound, _bq_utils.GoogleAPICallError) as exc:
+        logging.exception("BigQuery query failed: %s", job_name)
+        raise RuntimeError(f"BigQuery query failed ({job_name}): {exc}") from exc
+
+
+_bq_utils.create_bq_client = _create_bq_client_aou
+_main.create_bq_client = _create_bq_client_aou
+_bq_utils.run_query = _run_query_no_bqstorage
+_cohort.run_query = _run_query_no_bqstorage
+
 # Ensure output folders exist (uses CONFIG["output_dir"]).
 ensure_output_dir()
 
@@ -95,6 +139,16 @@ try:
 except Exception as exc:
     raise RuntimeError(
         "Configuration invalid. Set USER_INPUT['workspace_cdr'] or WORKSPACE_CDR env var before running."
+    ) from exc
+
+# Fast preflight to fail early with an actionable message if perimeter/project is wrong.
+try:
+    _probe = _create_bq_client_aou(location=CONFIG["bq_location"])
+    _probe.query("SELECT 1 AS ok").result()
+except Exception as exc:
+    raise RuntimeError(
+        "BigQuery preflight failed. In AoU this is usually a billing project/perimeter issue. "
+        "Set USER_INPUT['bq_project'] to your workspace terra-vpc-sc-* project and rerun."
     ) from exc
 
 result = run_pipeline()
